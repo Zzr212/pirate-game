@@ -7,11 +7,9 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// BITNO: Ovako server zna da treba traziti fajlove i u 'public' i u 'dist'
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// CONFIG
 const CONFIG = {
     graceTime: 60,       
     gameDuration: 600,   
@@ -28,7 +26,7 @@ const STATE = {
     tasksRequired: 0,
     portalOpen: false,
     mapConfig: { 
-        spawns: [{x:0, y:5, z:0}, {x:5, y:5, z:5}, {x:-5, y:5, z:-5}],
+        spawns: [{x:0, y:5, z:0}], // Default fallback
         tasks: [],
         portal: {x: 0, y: 2, z: 20}
     }
@@ -40,18 +38,23 @@ io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
 
     socket.on('joinLobby', (data) => {
+        // Ako je igra u toku, novi igrac je Spectator
         if (STATE.status !== GAME_STATE.LOBBY) {
             STATE.players[socket.id] = createPlayer(socket.id, data.name, 'spectator');
             socket.emit('gameStart', { 
                 mapConfig: STATE.mapConfig, 
                 players: STATE.players, 
                 timeLeft: STATE.timer,
-                status: STATE.status
+                status: STATE.status,
+                isSpectator: true
             });
             return;
         }
 
+        // Normalan join
         STATE.players[socket.id] = createPlayer(socket.id, data.name, 'survivor');
+        
+        // Javi svima novi lobby state, ali klijent odlucuje hoce li prikazati ekran
         io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
     });
 
@@ -81,29 +84,29 @@ io.on('connection', (socket) => {
         }
     });
 
-    // FIX: Attack Logic - Server validates roles
     socket.on('attackPlayer', (targetId) => {
         const attacker = STATE.players[socket.id];
         const target = STATE.players[targetId];
         
         if(!attacker || !target || STATE.status !== GAME_STATE.PLAYING) return;
 
-        // Captain infects Survivor
+        // 1. CAPTAIN INFECTS SURVIVOR -> BECOMES SKELETON (Enemy Model)
         if(attacker.role === 'captain' && target.role === 'survivor') {
-            target.role = 'skeleton';
-            io.emit('playerInfected', { id: targetId });
+            target.role = 'skeleton'; 
+            io.emit('playerInfected', { id: targetId, role: 'skeleton' });
             checkWinCondition();
         }
-        // Skeleton kills Survivor
+        // 2. SKELETON KILLS SURVIVOR -> BECOMES ENEMY MODEL TOO (Logic: Infected army grows)
+        // Ili ako zelis da umru skroz: target.role = 'spectator'
         else if(attacker.role === 'skeleton' && target.role === 'survivor') {
-            target.role = 'spectator';
-            io.emit('playerDied', { id: targetId });
+            target.role = 'skeleton'; // Zaraza se siri!
+            io.emit('playerInfected', { id: targetId, role: 'skeleton' });
             checkWinCondition();
         }
     });
 
     socket.on('escape', () => {
-        if(STATE.portalOpen) {
+        if(STATE.portalOpen && STATE.players[socket.id]) {
             io.emit('gameOver', { winner: 'SURVIVORS', reason: `${STATE.players[socket.id].name} escaped!` });
             resetGame();
         }
@@ -111,20 +114,23 @@ io.on('connection', (socket) => {
 
     socket.on('saveMapConfig', (cfg) => { 
         STATE.mapConfig = cfg; 
-        console.log("Map config saved");
+        console.log("Map config updated");
     });
 
     socket.on('disconnect', () => {
         const p = STATE.players[socket.id];
         if (p) {
+            const wasCaptain = (p.role === 'captain');
             delete STATE.players[socket.id];
+            
+            // Bitno: Javi klijentima da obrisu mesh
             io.emit('playerLeft', socket.id);
             io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
             
-            // FIX: Win Condition ako Kapetan izadje
             if (STATE.status === GAME_STATE.PLAYING) {
-                if (p.role === 'captain') {
-                    io.emit('gameOver', { winner: 'SURVIVORS', reason: "The Captain fled the curse!" });
+                if (wasCaptain) {
+                    // Ako kapetan izadje, survivori pobjedjuju
+                    io.emit('gameOver', { winner: 'SURVIVORS', reason: " The Captain fled in terror!" });
                     resetGame();
                 } else {
                     checkWinCondition();
@@ -135,10 +141,7 @@ io.on('connection', (socket) => {
 });
 
 function createPlayer(id, name, role) {
-    return {
-        id, name, role, isReady: false,
-        x: 0, y: 10, z: 0, rot: 0, anim: 'Idle'
-    };
+    return { id, name, role, isReady: false, x: 0, y: 10, z: 0, rot: 0, anim: 'Idle' };
 }
 
 function checkAutoStart() {
@@ -158,6 +161,7 @@ function startGame() {
 
     const pArray = Object.values(STATE.players);
     pArray.forEach((p, i) => {
+        // Rasporedi spawnowe
         const spawn = STATE.mapConfig.spawns[i % STATE.mapConfig.spawns.length] || {x:0, y:5, z:0};
         p.x = spawn.x; p.y = spawn.y + 2; p.z = spawn.z; 
         p.role = 'survivor';
@@ -179,9 +183,7 @@ function gameLoop() {
     io.emit('timerUpdate', STATE.timer);
 
     if (STATE.status === GAME_STATE.GRACE) {
-        if (STATE.timer <= 0) {
-            startInfection();
-        }
+        if (STATE.timer <= 0) startInfection();
     } else if (STATE.status === GAME_STATE.PLAYING) {
         if (STATE.timer <= 0) {
             io.emit('gameOver', { winner: 'INFECTED', reason: "Time ran out!" });
@@ -200,16 +202,15 @@ function startInfection() {
         captain.role = 'captain';
         io.emit('infectionStarted', { captainId: captain.id, timeLeft: STATE.timer });
     } else {
-        // Nema igraca za inficirati (npr svi izasli osim jednog)
-        io.emit('gameOver', { winner: 'DRAW', reason: "Not enough souls." });
         resetGame();
     }
 }
 
 function checkWinCondition() {
     const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
+    // Ako nema prezivjelih (svi su kapetani, skeletoni ili spectatori)
     if(survivors.length === 0) {
-        io.emit('gameOver', { winner: 'INFECTED', reason: "No survivors left!" });
+        io.emit('gameOver', { winner: 'INFECTED', reason: "All survivors fell to the curse!" });
         resetGame();
     }
 }
@@ -219,11 +220,12 @@ function resetGame() {
     STATE.status = GAME_STATE.ENDED;
     setTimeout(() => {
         STATE.status = GAME_STATE.LOBBY;
-        STATE.players = {}; // Ocisti igrace ili ih resetiraj, ovdje ih samo resetiramo
-        // Zapravo SocketIO drzi konekcije, moramo ih samo resetirati u objektu
-        // Ali jednostavnije je da klijenti refresaju ili da ih vratimo u lobby state
-        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status }); // Ovo ce poslati prazno jer smo brisali? 
-        // Bolje ne brisati konekcije nego samo resetirati role
+        // Reset igraca ali zadrzi konekcije
+        Object.values(STATE.players).forEach(p => {
+            p.isReady = false;
+            p.role = 'survivor';
+        });
+        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
     }, 5000);
 }
 
