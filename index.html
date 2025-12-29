@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cursed Gold - Pirate Horror</title>
+    <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+    <div id="app"></div>
+
+    <!-- 3D CHARACTER PREVIEW (BEHIND UI) -->
+    <div id="menu-background-3d"></div>
+
+    <!-- MAIN MENU (LOL STYLE) -->
+    <div id="main-menu">
+        <div class="menu-nav">
+            <div class="nav-item active">PLAY</div>
+            <div class="nav-item">COLLECTION</div>
+            <div class="nav-item">SHOP</div>
+            <div class="nav-item" id="btn-builder">MAP BUILDER</div>
+        </div>
+        
+        <div class="menu-content">
+            <div class="character-display">
+                <!-- 3D Character is rendered behind here -->
+                <h1 id="char-name-display">CAPTAIN BLACKBEARD</h1>
+                <button id="btn-change-char" class="btn-secondary">CHANGE PIRATE</button>
+            </div>
+            
+            <div class="play-section">
+                <input type="text" id="inp-nickname" placeholder="Enter Pirate Name" maxlength="12">
+                <button id="btn-play" class="btn-primary">FIND MATCH</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- LOBBY SCREEN -->
+    <div id="lobby-screen" style="display: none;">
+        <div class="lobby-container">
+            <h2>PIRATE COVE LOBBY</h2>
+            <div id="lobby-player-list">
+                <!-- Players injected here -->
+            </div>
+            <div class="lobby-controls">
+                <button id="btn-ready" class="btn-primary">READY UP</button>
+                <div id="lobby-status">Waiting for players...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- GAME UI -->
+    <div id="game-ui" style="display: none;">
+        <div id="quest-tracker">
+            <h3>TASKS</h3>
+            <ul id="task-list"></ul>
+        </div>
+
+        <div id="game-status-top">
+            <div id="role-display">SURVIVOR</div>
+            <div id="game-timer">60</div>
+            <div id="task-bar-container">
+                <div id="task-bar-fill"></div>
+            </div>
+        </div>
+
+        <div id="interaction-prompt">PRESS [E] TO INTERACT</div>
+
+        <div id="task-modal" style="display: none;">
+            <div class="task-box">
+                <h2 id="task-title">FIX WIRING</h2>
+                <div id="task-content"></div>
+                <button id="btn-close-task">CANCEL</button>
+            </div>
+        </div>
+        
+        <div id="spectator-ui" style="display: none;">
+            <div class="spec-banner">YOU ARE DEAD - SPECTATING</div>
+            <div class="spec-controls">
+                <button id="spec-prev">&lt;</button>
+                <span id="spec-target-name">Free Cam</span>
+                <button id="spec-next">&gt;</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- BUILDER UI -->
+    <div id="builder-ui" style="display: none;">
+        <div class="builder-panel">
+            <h3>MAP BUILDER</h3>
+            <p>[WASD] Move Cam | Click to Place</p>
+            <div class="builder-tools">
+                <button class="tool-btn active" data-type="spawn">Spawn Point (P)</button>
+                <button class="tool-btn" data-type="task">Task Location (T)</button>
+                <button class="tool-btn" data-type="portal">Exit Portal (E)</button>
+            </div>
+            <button id="btn-export-map" class="btn-secondary">EXPORT JSON</button>
+            <button id="btn-exit-builder" class="btn-secondary">EXIT</button>
+        </div>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+</body>
+</html>
