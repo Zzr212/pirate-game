@@ -9,24 +9,14 @@ const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// --- DEFAULT MAP CONFIG (Fallback ako nema map buildera) ---
-let MAP_CONFIG = {
-    spawns: [{x:0, y:2, z:0}, {x:5, y:2, z:0}, {x:-5, y:2, z:0}],
-    tasks: [
-        {id: 't1', type: 'wires', x: 10, y: 1, z: 10},
-        {id: 't2', type: 'debris', x: -10, y: 1, z: -10},
-        {id: 't3', type: 'wheel', x: 15, y: 1, z: -5},
-        {id: 't4', type: 'cannons', x: -15, y: 1, z: 5}
-    ],
-    portal: {x: 0, y: 2, z: 20}
+// CONFIG
+const CONFIG = {
+    graceTime: 60,       // 60 sekundi prije infekcije
+    gameDuration: 600,   // 10 minuta za Survivor pobjedu
+    minPlayers: 2        // Minimum za start
 };
 
-const GAME_STATE = {
-    LOBBY: 0,
-    GRACE: 1,      // 60s trcanja prije infekcije
-    PLAYING: 2,    // Infekcija aktivna, rjesavanje taskova
-    ENDED: 3
-};
+const GAME_STATE = { LOBBY: 0, GRACE: 1, PLAYING: 2, ENDED: 3 };
 
 const STATE = {
     status: GAME_STATE.LOBBY,
@@ -35,33 +25,36 @@ const STATE = {
     tasksCompleted: 0,
     tasksRequired: 0,
     portalOpen: false,
-    mapConfig: MAP_CONFIG
+    mapConfig: { // Default map config
+        spawns: [{x:0, y:5, z:0}, {x:5, y:5, z:5}, {x:-5, y:5, z:-5}, {x:5, y:5, z:-5}, {x:-5, y:5, z:5}],
+        tasks: [],
+        portal: {x: 0, y: 2, z: 20}
+    }
 };
 
-const CONFIG = {
-    graceTime: 60, // 60 sekundi prije infekcije
-    minPlayers: 2, // Smanjeno za testiranje, stavi 10 kasnije
-    autoStartTime: 60
-};
+let gameInterval = null;
 
 io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
 
     socket.on('joinLobby', (data) => {
-        STATE.players[socket.id] = {
-            id: socket.id,
-            name: data.name,
-            charModel: data.model || 'pirate_1',
-            role: 'survivor', // survivor, captain, skeleton, spectator
-            isReady: false,
-            x: 0, y: 0, z: 0, rot: 0, anim: 'Idle',
-            tasks: [], // Lista ID-eva taskova za ovog igraca
-            isDead: false
-        };
+        // Ako je igra vec u toku, baci ga u spectator mode
+        if (STATE.status !== GAME_STATE.LOBBY) {
+            STATE.players[socket.id] = createPlayer(socket.id, data.name, 'spectator');
+            socket.emit('gameStart', { 
+                mapConfig: STATE.mapConfig, 
+                players: STATE.players, 
+                timeLeft: STATE.timer,
+                status: STATE.status
+            });
+            return;
+        }
+
+        // Inace, normalan join
+        STATE.players[socket.id] = createPlayer(socket.id, data.name, 'survivor');
         
-        // Posalji mu stanje lobbyja
-        socket.emit('lobbyUpdate', { players: STATE.players, status: STATE.status, timer: STATE.timer });
-        io.emit('playerJoined', STATE.players[socket.id]);
+        // Update svima
+        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
     });
 
     socket.on('playerReady', () => {
@@ -72,99 +65,71 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('spectateSwitch', (targetId) => {
-        // Logika za spectate switchanje kamere salje se samo tom klijentu
-        socket.emit('spectateTarget', targetId);
-    });
-
     socket.on('updatePos', (data) => {
         const p = STATE.players[socket.id];
-        if(p && !p.isDead && STATE.status !== GAME_STATE.LOBBY) {
+        if(p && p.role !== 'spectator') {
             p.x = data.x; p.y = data.y; p.z = data.z;
             p.rot = data.rot; p.anim = data.anim;
             socket.broadcast.volatile.emit('updatePlayer', p);
         }
     });
 
-    socket.on('completeTask', (taskId) => {
-        const p = STATE.players[socket.id];
-        if(p && p.role === 'survivor' && p.tasks.includes(taskId)) {
-            // Ukloni task
-            p.tasks = p.tasks.filter(t => t !== taskId);
-            STATE.tasksCompleted++;
-            
-            // Provjeri portal
-            if(STATE.tasksCompleted >= STATE.tasksRequired) {
-                STATE.portalOpen = true;
-                io.emit('portalOpened', STATE.mapConfig.portal);
-            }
-
-            io.emit('taskUpdate', { 
-                id: taskId, 
-                completed: STATE.tasksCompleted, 
-                required: STATE.tasksRequired,
-                playerId: socket.id
-            });
+    socket.on('completeTask', () => {
+        STATE.tasksCompleted++;
+        io.emit('taskUpdate', { completed: STATE.tasksCompleted, required: STATE.tasksRequired });
+        if(STATE.tasksCompleted >= STATE.tasksRequired && STATE.tasksRequired > 0) {
+            STATE.portalOpen = true;
+            io.emit('portalOpened', STATE.mapConfig.portal);
         }
     });
 
     socket.on('attackPlayer', (targetId) => {
         const attacker = STATE.players[socket.id];
         const target = STATE.players[targetId];
-        
         if(!attacker || !target || STATE.status !== GAME_STATE.PLAYING) return;
 
-        // Validacija distance (jednostavna)
-        const dist = Math.sqrt((attacker.x-target.x)**2 + (attacker.z-target.z)**2);
-        if(dist > 3.0) return; 
-
-        // 1. CAPTAIN ATTACKS SURVIVOR -> BECOMES SKELETON
+        // Captain infects Survivor
         if(attacker.role === 'captain' && target.role === 'survivor') {
             target.role = 'skeleton';
-            // Smanji broj potrebnih taskova jer je ovaj postao zao
-            recalculateTasks(); 
-            io.emit('playerInfected', { id: targetId, role: 'skeleton' });
+            io.emit('playerInfected', { id: targetId });
+            checkWinCondition();
         }
-        // 2. SKELETON ATTACKS SURVIVOR -> DIES (SPECTATOR)
+        // Skeleton kills Survivor
         else if(attacker.role === 'skeleton' && target.role === 'survivor') {
             target.role = 'spectator';
-            target.isDead = true;
-            recalculateTasks();
             io.emit('playerDied', { id: targetId });
+            checkWinCondition();
         }
     });
 
     socket.on('escape', () => {
-        if(STATE.portalOpen && STATE.players[socket.id]) {
-            // Igrac je pobjegao
-            io.emit('playerEscaped', { id: socket.id, name: STATE.players[socket.id].name });
-            STATE.players[socket.id].role = 'spectator'; // Mice se s mape
+        if(STATE.portalOpen) {
+            io.emit('gameOver', { winner: 'SURVIVORS', reason: `${STATE.players[socket.id].name} escaped!` });
+            resetGame();
         }
     });
 
-    // --- MAP BUILDER SUPPORT ---
-    socket.on('saveMapConfig', (config) => {
-        console.log("New Map Config Received!");
-        MAP_CONFIG = config;
-        STATE.mapConfig = config;
-    });
+    socket.on('saveMapConfig', (cfg) => { STATE.mapConfig = cfg; });
 
     socket.on('disconnect', () => {
         delete STATE.players[socket.id];
         io.emit('playerLeft', socket.id);
-        // Ako je kapetan otisao, igra bi trebala zavrsiti ili birati novog (pojednostavljeno: game over)
-        if(STATE.status === GAME_STATE.PLAYING) {
-             const activePlayers = Object.values(STATE.players).filter(p => !p.isDead);
-             if(activePlayers.length < 1) endGame("Everyone Left");
-        }
+        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
+        if(STATE.status !== GAME_STATE.LOBBY) checkWinCondition();
     });
 });
+
+function createPlayer(id, name, role) {
+    return {
+        id, name, role, isReady: false,
+        x: 0, y: 10, z: 0, rot: 0, anim: 'Idle'
+    };
+}
 
 function checkAutoStart() {
     const players = Object.values(STATE.players);
     const readyCount = players.filter(p => p.isReady).length;
-    
-    if(STATE.status === GAME_STATE.LOBBY && players.length >= 2 && readyCount === players.length) {
+    if(players.length >= CONFIG.minPlayers && readyCount === players.length) {
         startGame();
     }
 }
@@ -172,94 +137,82 @@ function checkAutoStart() {
 function startGame() {
     STATE.status = GAME_STATE.GRACE;
     STATE.timer = CONFIG.graceTime;
-    STATE.portalOpen = false;
     STATE.tasksCompleted = 0;
+    STATE.tasksRequired = Object.keys(STATE.players).length * 2; // 2 taska po igracu
+    STATE.portalOpen = false;
 
-    // 1. Assign Tasks & Spawns
-    const players = Object.values(STATE.players);
-    const tasks = STATE.mapConfig.tasks;
-    
-    players.forEach((p, index) => {
+    // Assign Spawns
+    const pArray = Object.values(STATE.players);
+    pArray.forEach((p, i) => {
+        const spawn = STATE.mapConfig.spawns[i % STATE.mapConfig.spawns.length];
+        p.x = spawn.x; p.y = spawn.y + 2; p.z = spawn.z; // Malo u zraku da ne propadnu
         p.role = 'survivor';
-        p.isDead = false;
-        // Random spawn point
-        const spawn = STATE.mapConfig.spawns[index % STATE.mapConfig.spawns.length];
-        p.x = spawn.x; p.y = spawn.y; p.z = spawn.z;
-        
-        // Dodijeli 3 random taska svakom igracu
-        p.tasks = [];
-        for(let i=0; i<3; i++) {
-            const t = tasks[Math.floor(Math.random() * tasks.length)];
-            if(t) p.tasks.push(t.id);
-        }
     });
-
-    recalculateTasks();
 
     io.emit('gameStart', { 
-        mapConfig: STATE.mapConfig,
+        mapConfig: STATE.mapConfig, 
         players: STATE.players,
-        graceTime: CONFIG.graceTime
+        status: STATE.status,
+        timeLeft: STATE.timer
     });
 
-    // Grace Period Loop
-    let graceInt = setInterval(() => {
-        STATE.timer--;
-        io.emit('timerUpdate', STATE.timer);
-        if(STATE.timer <= 0) {
-            clearInterval(graceInt);
+    // Start Timer Loop
+    if(gameInterval) clearInterval(gameInterval);
+    gameInterval = setInterval(gameLoop, 1000);
+}
+
+function gameLoop() {
+    STATE.timer--;
+    io.emit('timerUpdate', STATE.timer);
+
+    if (STATE.status === GAME_STATE.GRACE) {
+        if (STATE.timer <= 0) {
             startInfection();
         }
-    }, 1000);
+    } else if (STATE.status === GAME_STATE.PLAYING) {
+        if (STATE.timer <= 0) {
+            // Time is up, Pirates win!
+            io.emit('gameOver', { winner: 'INFECTED', reason: "Time ran out!" });
+            resetGame();
+        }
+    }
 }
 
 function startInfection() {
     STATE.status = GAME_STATE.PLAYING;
-    const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
+    STATE.timer = CONFIG.gameDuration; // 10 minuta
     
+    const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
     if(survivors.length > 0) {
         const captain = survivors[Math.floor(Math.random() * survivors.length)];
         captain.role = 'captain';
-        // Kapetan nema taskove
-        captain.tasks = [];
-        recalculateTasks();
-        
-        io.emit('infectionStarted', { captainId: captain.id });
+        io.emit('infectionStarted', { captainId: captain.id, timeLeft: STATE.timer });
     } else {
-        endGame("No players to infect!");
+        resetGame();
     }
 }
 
-function recalculateTasks() {
-    // Ukupan broj taskova = suma svih taskova prezivjelih
-    let total = 0;
-    Object.values(STATE.players).forEach(p => {
-        if(p.role === 'survivor') total += p.tasks.length;
-    });
-    // Dodamo vec zavrsene na to
-    STATE.tasksRequired = total + STATE.tasksCompleted;
-    
-    // Ako su svi taskovi gotovi (ili nema survivor-a), otvori portal
-    if(STATE.tasksRequired > 0 && STATE.tasksCompleted >= STATE.tasksRequired) {
-        STATE.portalOpen = true;
-        io.emit('portalOpened', STATE.mapConfig.portal);
+function checkWinCondition() {
+    const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
+    if(survivors.length === 0) {
+        io.emit('gameOver', { winner: 'INFECTED', reason: "No survivors left!" });
+        resetGame();
     }
 }
 
-function endGame(reason) {
+function resetGame() {
+    clearInterval(gameInterval);
     STATE.status = GAME_STATE.ENDED;
-    io.emit('gameEnded', { reason });
     setTimeout(() => {
         STATE.status = GAME_STATE.LOBBY;
         Object.values(STATE.players).forEach(p => {
-            p.role = 'survivor';
             p.isReady = false;
-            p.isDead = false;
+            p.role = 'survivor';
         });
         io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
     }, 5000);
 }
 
 server.listen(3000, () => {
-    console.log('Cursed Gold Server running on port 3000');
+    console.log('Server running on 3000');
 });
