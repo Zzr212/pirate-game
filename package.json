@@ -1,7 +1,7 @@
 {
-  "name": "pirate-game-3d",
+  "name": "pirate-infection-game",
   "version": "1.0.0",
-  "description": "Multiplayer Pirate Game",
+  "description": "3D Multiplayer Pirate Game",
   "main": "server.js",
   "scripts": {
     "dev": "vite",
@@ -11,14 +11,9 @@
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.7.2",
-    "socket.io-client": "^4.7.2",
-    "three": "^0.160.0",
-    "uuid": "^9.0.1"
+    "three": "^0.160.0"
   },
   "devDependencies": {
-    "vite": "^5.0.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "vite": "^5.0.10"
   }
 }

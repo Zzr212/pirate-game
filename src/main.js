@@ -1,557 +1,325 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { io } from "socket.io-client";
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+import { io } from 'socket.io-client';
 
-// STATE
-const MODES = { MENU: 0, LOBBY: 1, GAME: 2, BUILDER: 3, END: 4 };
-let currentMode = MODES.MENU;
-let socket, myId, myRole = 'survivor';
+// SETUP SOCKET
+const socket = io();
 
-// THREE JS
-let scene, camera, renderer, clock;
-let characterTemplate, enemyTemplate;
-let players = {}; 
-let mapMesh = null;
-let taskMarkers = [];
+// SCENE SETUP
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111111);
+scene.fog = new THREE.FogExp2(0x111111, 0.02);
 
-// PHYSICS & CONTROLS
-const raycaster = new THREE.Raycaster();
-const downVector = new THREE.Vector3(0, -1, 0);
-let camYaw = 0, camPitch = 0.3;
-const keys = { w:false, a:false, s:false, d:false, space:false, shift:false };
-let velocityY = 0;
-const GRAVITY = 30.0;
-const JUMP_FORCE = 12.0;
-let onGround = false;
-let isMouseDown = false;
-let isRightMouseDown = false;
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
 
-// BUILDER
-let builderConfig = { spawns: [], tasks: [], portal: null };
-let builderTool = 'spawn';
-let ghostMesh = null;
-let builderCamYaw = 0, builderCamPitch = 0;
-let mouse = new THREE.Vector2();
+// LIGHTS
+const ambientLight = new THREE.AmbientLight(0x404040, 1.5);
+scene.add(ambientLight);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+dirLight.position.set(10, 20, 10);
+dirLight.castShadow = true;
+scene.add(dirLight);
 
-// SPECTATOR
-let spectatorIndex = 0;
+// GAME VARIABLES
+const players = {}; // Local representation of other players
+let myId = null;
+let myModel = null;
+let mixer = null;
+let animations = {};
+let currentAction = 'Idle';
+let isSpectator = false;
+let myRole = 'LOBBY';
 
-function init() {
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x05080a);
-    scene.fog = new THREE.Fog(0x05080a, 10, 80);
+// ASSETS
+const loader = new GLTFLoader();
+let assets = { character: null, enemy: null, map: null };
 
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-    
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    document.getElementById('scene-layer').appendChild(renderer.domElement);
-
-    // LIGHTING
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
-    scene.add(hemi);
-    const dir = new THREE.DirectionalLight(0xffdfba, 1.5);
-    dir.position.set(50, 100, 50);
-    dir.castShadow = true;
-    dir.shadow.mapSize.set(2048, 2048);
-    dir.shadow.camera.left = -50; dir.shadow.camera.right = 50;
-    dir.shadow.camera.top = 50; dir.shadow.camera.bottom = -50;
-    scene.add(dir);
-
-    socket = io();
-    setupSocket();
-    setupInputs();
-    bindUI();
-
-    loadAssets().then(() => {
-        clock = new THREE.Clock();
-        animate();
-    });
-}
-
+// LOADING MANAGER
 async function loadAssets() {
-    const loader = new GLTFLoader();
+    // Load Map
+    const mapData = await loader.loadAsync('/map.glb');
+    scene.add(mapData.scene);
     
-    // MAP
-    try {
-        const mapGltf = await loader.loadAsync('/map.glb');
-        mapMesh = mapGltf.scene;
-        mapMesh.traverse(c => { if(c.isMesh) { c.receiveShadow=true; c.castShadow=true; } });
-        scene.add(mapMesh);
-    } catch (e) {
-        console.log("Using fallback grid.");
-        createFallbackMap();
-    }
+    // Load Character (Survivor/Captain)
+    const charData = await loader.loadAsync('/character.gltf');
+    assets.character = charData;
 
-    // CHARACTERS
-    try {
-        const charGltf = await loader.loadAsync('/character.gltf');
-        characterTemplate = charGltf.scene;
-        // Fix rotation of raw model if needed
-        characterTemplate.rotation.set(0,0,0); 
-        characterTemplate.animations = charGltf.animations;
+    // Load Enemy (Skeleton)
+    const enemyData = await loader.loadAsync('/assets/enemy.gltf');
+    assets.enemy = enemyData;
+    
+    console.log("Assets loaded!");
+}
+loadAssets();
+
+// CONTROLS
+const controls = new PointerLockControls(camera, document.body);
+const moveState = { forward: false, backward: false, left: false, right: false, jump: false, sprint: false };
+const velocity = new THREE.Vector3();
+const direction = new THREE.Vector3();
+
+// DOM ELEMENTS
+const menu = document.getElementById('main-menu');
+const lobby = document.getElementById('lobby-screen');
+const hud = document.getElementById('hud');
+const btnFind = document.getElementById('btn-find-match');
+const btnReady = document.getElementById('btn-ready');
+
+// EVENT LISTENERS
+btnFind.addEventListener('click', () => {
+    menu.classList.add('hidden');
+    lobby.classList.remove('hidden');
+    controls.lock(); // Start accepting input context
+});
+
+btnReady.addEventListener('click', () => {
+    socket.emit('playerReady');
+    btnReady.classList.toggle('ready-btn-active'); // Add visual feedback via CSS if needed
+});
+
+document.addEventListener('keydown', (e) => {
+    if(isSpectator) return;
+    switch (e.code) {
+        case 'KeyW': moveState.forward = true; break;
+        case 'KeyA': moveState.left = true; break;
+        case 'KeyS': moveState.backward = true; break;
+        case 'KeyD': moveState.right = true; break;
+        case 'Space': if (velocity.y === 0) velocity.y = 15; break; // Simple jump
+        case 'ShiftLeft': moveState.sprint = true; break;
+        case 'KeyE': socket.emit('completeTask'); break; // Task logic simplified
+    }
+});
+document.addEventListener('keyup', (e) => {
+    switch (e.code) {
+        case 'KeyW': moveState.forward = false; break;
+        case 'KeyA': moveState.left = false; break;
+        case 'KeyS': moveState.backward = false; break;
+        case 'KeyD': moveState.right = false; break;
+        case 'ShiftLeft': moveState.sprint = false; break;
+    }
+});
+
+document.addEventListener('mousedown', () => {
+    if(!controls.isLocked) controls.lock();
+    if(myRole !== 'SPECTATOR' && myRole !== 'LOBBY') {
+        playAnim('Punch'); // Ili Sword ako imas
+        // Attack logic
+        socket.emit('attackSwing');
+        // Simple Raycast attack
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+        const intersects = raycaster.intersectObjects(scene.children, true);
         
-        // Preview
-        const preview = SkeletonUtils.clone(characterTemplate);
-        preview.position.set(2, 0, 5);
-        preview.rotation.y = 0; 
-        preview.name = "previewChar";
-        scene.add(preview);
-    } catch {
-        characterTemplate = new THREE.Mesh(new THREE.BoxGeometry(1,2,1), new THREE.MeshStandardMaterial({color:0xff0000}));
-    }
-
-    try {
-        const enemyGltf = await loader.loadAsync('/assets/enemy.gltf');
-        enemyTemplate = enemyGltf.scene;
-        enemyTemplate.animations = enemyGltf.animations;
-    } catch {
-        enemyTemplate = new THREE.Mesh(new THREE.BoxGeometry(1,2,1), new THREE.MeshStandardMaterial({color:0x00ff00}));
-    }
-}
-
-function createFallbackMap() {
-    const plane = new THREE.Mesh(new THREE.PlaneGeometry(200,200), new THREE.MeshStandardMaterial({color:0x222222}));
-    plane.rotation.x = -Math.PI/2;
-    plane.receiveShadow = true;
-    scene.add(plane);
-    mapMesh = plane;
-    scene.add(new THREE.GridHelper(200, 200));
-}
-
-function bindUI() {
-    document.getElementById('btn-play').onclick = () => {
-        currentMode = MODES.LOBBY;
-        switchUI('lobby-screen');
-        if(scene.getObjectByName("previewChar")) scene.remove(scene.getObjectByName("previewChar"));
-        const name = document.getElementById('inp-nickname').value || "Pirate";
-        socket.emit('joinLobby', { name: name });
-    };
-    document.getElementById('btn-ready').onclick = () => socket.emit('playerReady');
-    document.getElementById('btn-leave-lobby').onclick = () => window.location.reload();
-    document.getElementById('btn-back-menu').onclick = () => window.location.reload();
-    document.getElementById('btn-builder').onclick = () => {
-        if (!mapMesh) { alert("Map missing!"); return; }
-        enterBuilderMode();
-    };
-    document.getElementById('btn-exit-builder').onclick = () => window.location.reload();
-    document.querySelectorAll('.tool-btn').forEach(b => {
-        b.onclick = (e) => {
-            document.querySelectorAll('.tool-btn').forEach(x => x.classList.remove('active'));
-            e.currentTarget.classList.add('active');
-            builderTool = e.currentTarget.dataset.type;
-            updateGhostMesh();
-        };
-    });
-    document.getElementById('btn-export-map').onclick = () => {
-        console.log(JSON.stringify(builderConfig));
-        socket.emit('saveMapConfig', builderConfig);
-    };
-}
-
-function setupSocket() {
-    socket.on('lobbyUpdate', (data) => {
-        if(currentMode !== MODES.LOBBY) return;
-        const list = document.getElementById('lobby-player-list');
-        list.innerHTML = '';
-        Object.values(data.players).forEach(p => {
-            const el = document.createElement('div');
-            el.className = `lobby-player ${p.isReady ? 'ready' : ''}`;
-            el.innerHTML = `<span>${p.name}</span> <span class="status">${p.isReady ? 'READY' : 'WAITING'}</span>`;
-            list.appendChild(el);
-        });
-    });
-
-    socket.on('gameStart', (data) => {
-        currentMode = MODES.GAME;
-        switchUI('game-ui');
-        
-        // Clean scene
-        Object.values(players).forEach(p => scene.remove(p.group));
-        players = {};
-        taskMarkers.forEach(t => scene.remove(t.mesh));
-        taskMarkers = [];
-
-        Object.values(data.players).forEach(p => spawnPlayer(p));
-        data.mapConfig.tasks.forEach(t => {
-            const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.3), new THREE.MeshBasicMaterial({color:0xffff00}));
-            m.position.set(t.x, t.y, t.z);
-            scene.add(m);
-            taskMarkers.push({mesh: m, id: t.id});
-        });
-
-        if(data.isSpectator) {
-             myRole = 'spectator';
-             showNotification("SPECTATING", "yellow");
-             document.exitPointerLock();
+        for (let i = 0; i < intersects.length; i++) {
+            if (intersects[i].distance < 3 && intersects[i].object.userData.playerId) {
+                socket.emit('attackHit', intersects[i].object.userData.playerId);
+                break;
+            }
         }
+    }
+});
+
+// SOCKET HANDLERS
+socket.on('connect', () => { myId = socket.id; });
+
+socket.on('updatePlayers', (serverPlayers) => {
+    // Update UI List in Lobby
+    const list = document.getElementById('player-list');
+    list.innerHTML = '';
+    Object.values(serverPlayers).forEach(p => {
+        list.innerHTML += `<div class="${p.isReady ? 'ready' : 'not-ready'}">Player ${p.id.substr(0,4)}</div>`;
     });
 
-    socket.on('updatePlayer', (p) => {
-        if(players[p.id]) {
-            players[p.id].targetPos.set(p.x, p.y, p.z);
-            players[p.id].targetRot = p.rot;
-            updateAnim(players[p.id], p.anim);
+    // Handle 3D Models
+    Object.keys(serverPlayers).forEach(id => {
+        const pData = serverPlayers[id];
+
+        if (id === myId) {
+            // My Role Logic update
+            if (myRole !== pData.role) {
+                myRole = pData.role;
+                updateRoleUI(pData.role);
+                // Respawn logic (re-create model if needed)
+                if (pData.role === 'SKELETON' || pData.role === 'CAPTAIN') createMyPlayer(pData.role);
+            }
+            // Update HP UI
+            document.getElementById('hp-bar-fill').style.width = pData.hp + '%';
+            return; 
+        }
+
+        // Other players
+        if (!players[id]) {
+            // Create new player mesh
+            let model = null;
+            if (pData.role === 'SKELETON') model = assets.enemy.scene.clone();
+            else model = assets.character.scene.clone();
+
+            model.position.set(pData.x, pData.y, pData.z);
+            model.userData.playerId = id; // For raycasting
+            scene.add(model);
+            players[id] = { mesh: model, role: pData.role };
         } else {
-            spawnPlayer(p);
+            // Update position
+            const p = players[id];
+            p.mesh.position.lerp(new THREE.Vector3(pData.x, pData.y, pData.z), 0.1);
+            p.mesh.rotation.y = pData.rotation;
+            
+            // Check if model needs swap (e.g. became infected)
+            if (p.role !== pData.role) {
+                scene.remove(p.mesh);
+                let newModel = (pData.role === 'SKELETON') ? assets.enemy.scene.clone() : assets.character.scene.clone();
+                scene.add(newModel);
+                players[id].mesh = newModel;
+                players[id].role = pData.role;
+            }
+            
+            // Captain Trail Logic
+            if (pData.role === 'CAPTAIN') spawnTrail(p.mesh.position);
         }
     });
 
-    socket.on('infectionStarted', (data) => {
-        if(data.captainId === socket.id) { myRole = 'captain'; showNotification("YOU ARE THE CAPTAIN!", "red"); }
-        else showNotification("CAPTAIN CHOSEN!", "yellow");
-        updateHUD();
-    });
-
-    socket.on('playerInfected', (data) => {
-        if(players[data.id]) swapModelToEnemy(players[data.id]);
-        if(data.id === socket.id) {
-            myRole = 'skeleton';
-            showNotification("YOU ARE INFECTED!", "red");
-            updateHUD();
-        }
-    });
-
-    socket.on('playerDied', (data) => {
-        if(players[data.id]) players[data.id].group.visible = false;
-        if(data.id === socket.id) {
-            myRole = 'spectator';
-            document.exitPointerLock();
-            showNotification("YOU DIED.", "red");
-            updateHUD();
-        }
-    });
-
-    socket.on('playerLeft', (id) => {
-        if(players[id]) {
-            scene.remove(players[id].group);
+    // Remove disconnected
+    Object.keys(players).forEach(id => {
+        if (!serverPlayers[id]) {
+            scene.remove(players[id].mesh);
             delete players[id];
         }
     });
+});
 
-    socket.on('timerUpdate', (t) => document.getElementById('game-timer').innerText = formatTime(t));
-    socket.on('gameOver', (data) => {
-        currentMode = MODES.END;
-        switchUI('end-screen');
-        document.getElementById('end-title').innerText = `${data.winner} WIN!`;
-        document.getElementById('end-reason').innerText = data.reason;
-        document.exitPointerLock();
+socket.on('gameState', (state) => {
+    if (state === 'PLAYING') {
+        lobby.classList.add('hidden');
+        hud.classList.remove('hidden');
+        createMyPlayer(myRole);
+    }
+});
+
+socket.on('timer', (time) => {
+    const cd = document.getElementById('countdown');
+    cd.classList.remove('hidden');
+    cd.innerText = time;
+});
+
+socket.on('taskUpdate', (data) => {
+    const pct = (data.current / data.total) * 100;
+    document.getElementById('task-bar-fill').style.width = pct + '%';
+});
+
+socket.on('gameOver', (msg) => {
+    document.getElementById('game-over').classList.remove('hidden');
+    document.getElementById('winner-text').innerText = msg;
+    hud.classList.add('hidden');
+    controls.unlock();
+});
+
+// HELPERS
+function createMyPlayer(role) {
+    if (myModel) scene.remove(myModel);
+    
+    // Select model based on role
+    const source = (role === 'SKELETON') ? assets.enemy : assets.character;
+    if (!source) return;
+
+    myModel = source.scene.clone();
+    scene.add(myModel);
+    
+    // Setup Animations
+    mixer = new THREE.AnimationMixer(myModel);
+    source.animations.forEach((clip) => {
+        animations[clip.name] = mixer.clipAction(clip);
     });
-}
-
-// --- PLAYER SPAWNING WITH GROUP WRAPPER ---
-function spawnPlayer(data) {
-    if(players[data.id]) return;
-
-    // 1. Create Container Group (Handles Physics/Pos)
-    const group = new THREE.Group();
-    group.position.set(data.x, data.y, data.z);
-    scene.add(group);
-
-    // 2. Determine Template
-    let template = (data.role === 'skeleton') ? enemyTemplate : characterTemplate;
+    playAnim('Idle');
     
-    // 3. Clone Mesh and Fix Rotation
-    const mesh = SkeletonUtils.clone(template);
-    // FIX: Rotiramo mesh unutar grupe da gleda ispravno (često modeli gledaju +Z a Three treba -Z)
-    // Ako model lebdi horizontalno, ovdje podesi mesh.rotation.x
-    // Ako model hoda unazad, podesi mesh.rotation.y = Math.PI
-    mesh.rotation.set(0, Math.PI, 0); 
-    group.add(mesh);
+    // Reset Camera
+    camera.position.set(0, 5, 10);
+}
 
-    // 4. Setup Animation
-    const pMixer = new THREE.AnimationMixer(mesh);
-    const actions = {};
-    if(template.animations) {
-        template.animations.forEach(clip => {
-            const name = clip.name.toLowerCase();
-            if(name.includes('idle')) actions['Idle'] = pMixer.clipAction(clip);
-            else if(name.includes('run') || name.includes('walk')) actions['Run'] = pMixer.clipAction(clip);
-            else if(name.includes('attack')) actions['Attack'] = pMixer.clipAction(clip);
-            else if(name.includes('death')) actions['Death'] = pMixer.clipAction(clip);
-        });
-    }
-    if(actions['Idle']) actions['Idle'].play();
-
-    players[data.id] = {
-        id: data.id, group: group, mesh: mesh, mixer: pMixer, actions, currentAnim: 'Idle',
-        targetPos: new THREE.Vector3(data.x, data.y, data.z), targetRot: data.rot,
-        role: data.role
-    };
-
-    if(data.id === socket.id) {
-        myId = data.id;
-        myRole = data.role;
-        updateHUD();
-        camera.position.set(data.x, data.y + 5, data.z + 5);
+function playAnim(name) {
+    if (currentAction === name) return;
+    if (animations[currentAction]) animations[currentAction].fadeOut(0.2);
+    if (animations[name]) {
+        animations[name].reset().fadeIn(0.2).play();
+        currentAction = name;
     }
 }
 
-function swapModelToEnemy(pObj) {
-    pObj.group.remove(pObj.mesh);
-    const mesh = SkeletonUtils.clone(enemyTemplate);
-    mesh.rotation.set(0, Math.PI, 0); // Apply same fix
-    pObj.group.add(mesh);
-    
-    pObj.mesh = mesh;
-    pObj.mixer = new THREE.AnimationMixer(mesh);
-    pObj.actions = {};
-    
-    if(enemyTemplate.animations) {
-        enemyTemplate.animations.forEach(clip => {
-            const name = clip.name.toLowerCase();
-            if(name.includes('idle')) pObj.actions['Idle'] = pObj.mixer.clipAction(clip);
-            else if(name.includes('run') || name.includes('walk')) pObj.actions['Run'] = pObj.mixer.clipAction(clip);
-            else if(name.includes('attack')) pObj.actions['Attack'] = pObj.mixer.clipAction(clip);
-        });
-    }
-    if(pObj.actions['Idle']) pObj.actions['Idle'].play();
-    pObj.currentAnim = 'Idle';
+function updateRoleUI(role) {
+    const el = document.getElementById('role-display');
+    el.innerText = role;
+    if(role === 'CAPTAIN') el.style.color = 'red';
+    else if (role === 'SKELETON') el.style.color = 'purple';
+    else el.style.color = 'cyan';
 }
 
-// PHYSICS
-function updatePhysics(delta) {
-    if(myRole === 'spectator') return;
-    const me = players[myId];
-    if(!me) return;
-
-    const speed = keys.shift ? 9 : 6;
-    const moveDir = new THREE.Vector3();
-    const forward = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
-    const right = new THREE.Vector3(Math.sin(camYaw - Math.PI/2), 0, Math.cos(camYaw - Math.PI/2));
-
-    // W ide naprijed (oduzimamo forward vektor)
-    if(keys.w) moveDir.sub(forward); 
-    if(keys.s) moveDir.add(forward); 
-    if(keys.a) moveDir.add(right);
-    if(keys.d) moveDir.sub(right);
-
-    if(moveDir.length() > 0) moveDir.normalize();
-
-    // ATTACK
-    if(isMouseDown && (myRole === 'captain' || myRole === 'skeleton')) {
-        isMouseDown = false; 
-        updateAnim(me, 'Attack');
-        Object.values(players).forEach(other => {
-            if(other.id !== myId && other.group.visible) {
-                 const dist = me.group.position.distanceTo(other.group.position);
-                 if(dist < 2.5) socket.emit('attackPlayer', other.id);
-            }
-        });
-    }
-
-    // GRAVITY
-    if(onGround) {
-        velocityY = 0;
-        if(keys.space) { velocityY = JUMP_FORCE; onGround = false; }
-    } else {
-        velocityY -= GRAVITY * delta;
-    }
-
-    const intendedMove = moveDir.multiplyScalar(speed * delta);
-    me.group.position.x += intendedMove.x;
-    me.group.position.z += intendedMove.z;
-    me.group.position.y += velocityY * delta;
-
-    // GROUND CHECK
-    // Cast ray from CENTER (y+0.5) downwards. 
-    // If y is at feet level, casting from y+0.5 means length 0.5 is ground.
-    raycaster.set(new THREE.Vector3(me.group.position.x, me.group.position.y + 0.5, me.group.position.z), downVector);
-    const intersects = mapMesh ? raycaster.intersectObject(mapMesh, true) : [];
-
-    if(intersects.length > 0) {
-        const hitY = intersects[0].point.y;
-        const dist = intersects[0].distance;
-        
-        // If distance < 0.5 (meaning feet are below ground) OR just slightly above
-        if(dist <= 0.6 && velocityY <= 0) {
-            me.group.position.y = hitY;
-            onGround = true;
-        } else {
-            onGround = false;
-        }
-    } else {
-        if(me.group.position.y < 0) { me.group.position.y = 0; onGround = true; }
-    }
-
-    // ROTATION & ANIMATION
-    if(moveDir.lengthSq() > 0) {
-        // FIX: Rotation offset logic
-        // atan2(x, z) gives rotation from North. 
-        // We add Math.PI because we rotated the mesh inside the group by PI.
-        const targetRot = Math.atan2(moveDir.x, moveDir.z); 
-        me.group.rotation.y = targetRot;
-        
-        if(me.currentAnim !== 'Attack') updateAnim(me, 'Run');
-    } else {
-        if(me.currentAnim !== 'Attack') updateAnim(me, 'Idle');
-    }
-
-    // SYNC
-    socket.emit('updatePos', {
-        x: me.group.position.x, y: me.group.position.y, z: me.group.position.z,
-        rot: me.group.rotation.y, anim: me.currentAnim
-    });
-
-    // CAMERA
-    const camDist = 6;
-    const camHeight = 4;
-    const offset = new THREE.Vector3(0, camHeight, camDist);
-    offset.applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
-    
-    camera.position.lerp(me.group.position.clone().add(offset), 0.2);
-    camera.lookAt(me.group.position.x, me.group.position.y + 1.5, me.group.position.z);
+function spawnTrail(pos) {
+    // Simple particle logic could go here
+    // For now assume Three.js points or sprites
 }
 
-function updateSpectator() {
-    const active = Object.values(players).filter(p => p.role !== 'spectator' && p.group.visible);
-    if(active.length === 0) return;
-    if(spectatorIndex >= active.length) spectatorIndex = 0;
-    const target = active[spectatorIndex];
-    if(target) {
-        camera.position.lerp(new THREE.Vector3(target.group.position.x, target.group.position.y + 8, target.group.position.z + 8), 0.1);
-        camera.lookAt(target.group.position);
-    }
-}
+// GAME LOOP
+const clock = new THREE.Clock();
 
 function animate() {
     requestAnimationFrame(animate);
     const delta = clock.getDelta();
-    Object.values(players).forEach(p => { if(p.mixer) p.mixer.update(delta); });
 
-    if(currentMode === MODES.GAME) {
-        if(myRole !== 'spectator') updatePhysics(delta);
-        else updateSpectator();
+    if (gameState === 'PLAYING' && myModel && !isSpectator) {
+        // Movement Logic
+        if (moveState.forward) velocity.z = moveState.sprint ? 15 : 8;
+        else if (moveState.backward) velocity.z = -5;
+        else velocity.z = 0;
+
+        if (moveState.left) velocity.x = -5;
+        else if (moveState.right) velocity.x = 5;
+        else velocity.x = 0;
+
+        // Apply movement relative to camera direction
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        camDir.y = 0;
+        camDir.normalize();
         
-        Object.values(players).forEach(p => {
-            if(p.id !== myId) {
-                p.group.position.lerp(p.targetPos, 15 * delta); 
-                // Rotation sync
-                let rDiff = p.targetRot - p.group.rotation.y;
-                while(rDiff > Math.PI) rDiff -= Math.PI*2;
-                while(rDiff < -Math.PI) rDiff += Math.PI*2;
-                p.group.rotation.y += rDiff * 10 * delta;
-                
-                updateAnim(p, p.serverAnim || 'Idle');
-            }
+        const moveVec = new THREE.Vector3();
+        moveVec.add(camDir.clone().multiplyScalar(velocity.z * delta)); // Forward/Back
+        
+        const sideDir = new THREE.Vector3(-camDir.z, 0, camDir.x);
+        moveVec.add(sideDir.clone().multiplyScalar(velocity.x * delta)); // Strafe
+
+        myModel.position.add(moveVec);
+        myModel.position.y = 0; // Lock to floor for simplicity (use collision for real map)
+        
+        // Rotate model to face move direction
+        if (velocity.length() > 0) {
+            playAnim(moveState.sprint ? 'Run' : 'Walk');
+            const targetRot = Math.atan2(moveVec.x, moveVec.z);
+            myModel.rotation.y = targetRot;
+        } else {
+            playAnim('Idle');
+        }
+
+        // Camera Follow
+        camera.position.x = myModel.position.x;
+        camera.position.z = myModel.position.z + 5;
+        camera.position.y = myModel.position.y + 5;
+        camera.lookAt(myModel.position);
+
+        // Send Data
+        socket.emit('updateMove', {
+            x: myModel.position.x,
+            y: myModel.position.y,
+            z: myModel.position.z,
+            rotation: myModel.rotation.y,
+            anim: currentAction
         });
-    } else if(currentMode === MODES.BUILDER) {
-        updateBuilder(delta);
     }
-    
+
+    if (mixer) mixer.update(delta);
     renderer.render(scene, camera);
 }
-
-function updateAnim(p, name) {
-    if(p.currentAnim === name) return;
-    if(p.actions[p.currentAnim]) p.actions[p.currentAnim].fadeOut(0.2);
-    if(p.actions[name]) p.actions[name].reset().fadeIn(0.2).play();
-    p.currentAnim = name;
-}
-
-function setupInputs() {
-    window.addEventListener('keydown', e => { 
-        if(e.key) keys[e.key.toLowerCase()] = true; 
-        if(myRole === 'spectator') {
-            if(e.key.toLowerCase() === 'a') spectatorIndex--;
-            if(e.key.toLowerCase() === 'd') spectatorIndex++;
-        }
-    });
-    window.addEventListener('keyup', e => { if(e.key) keys[e.key.toLowerCase()] = false; });
-    
-    document.addEventListener('mousemove', e => {
-        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-
-        if(currentMode === MODES.GAME && document.pointerLockElement) {
-            camYaw -= e.movementX * 0.002;
-            camPitch -= e.movementY * 0.002;
-            camPitch = Math.max(-0.5, Math.min(1.0, camPitch));
-        } else if(currentMode === MODES.BUILDER && isRightMouseDown) {
-             builderCamYaw -= e.movementX * 0.004;
-             builderCamPitch -= e.movementY * 0.004;
-        }
-    });
-
-    window.addEventListener('mousedown', e => {
-        if(e.button === 0) isMouseDown = true;
-        if(e.button === 2) isRightMouseDown = true;
-    });
-    window.addEventListener('mouseup', () => { isMouseDown = false; isRightMouseDown = false; });
-    document.addEventListener('click', () => {
-        if(currentMode === MODES.GAME && myRole !== 'spectator') document.body.requestPointerLock();
-    });
-}
-
-function updateBuilder(delta) {
-    const speed = 20 * delta;
-    const forward = new THREE.Vector3(Math.sin(builderCamYaw), 0, Math.cos(builderCamYaw));
-    const right = new THREE.Vector3(Math.sin(builderCamYaw - Math.PI/2), 0, Math.cos(builderCamYaw - Math.PI/2));
-    if(keys.w) camera.position.addScaledVector(forward, -speed);
-    if(keys.s) camera.position.addScaledVector(forward, speed);
-    if(keys.a) camera.position.addScaledVector(right, speed);
-    if(keys.d) camera.position.addScaledVector(right, -speed);
-    if(keys.q) camera.position.y += speed;
-    if(keys.e) camera.position.y -= speed;
-    camera.rotation.set(builderCamPitch, builderCamYaw, 0);
-    
-    raycaster.setFromCamera(mouse, camera);
-    const intersects = mapMesh ? raycaster.intersectObject(mapMesh, true) : [];
-    if(intersects.length > 0) {
-        const p = intersects[0].point;
-        if(ghostMesh) ghostMesh.position.copy(p);
-        if(isMouseDown && ghostMesh) {
-             isMouseDown = false;
-             const marker = ghostMesh.clone();
-             marker.material = marker.material.clone();
-             marker.material.opacity = 1; marker.material.transparent = false;
-             scene.add(marker);
-             const data = {x:p.x, y:p.y, z:p.z};
-             if(builderTool === 'spawn') builderConfig.spawns.push(data);
-             else if(builderTool === 'task') builderConfig.tasks.push({id:'t'+Date.now(), ...data});
-             else if(builderTool === 'portal') builderConfig.portal = data;
-        }
-    }
-}
-
-function updateGhostMesh() {
-    if(ghostMesh) scene.remove(ghostMesh);
-    let col = (builderTool==='spawn')?0x00ff00:(builderTool==='task'?0xffff00:0x00ffff);
-    ghostMesh = new THREE.Mesh(new THREE.BoxGeometry(0.5,2,0.5), new THREE.MeshBasicMaterial({color:col, transparent:true, opacity:0.5}));
-    scene.add(ghostMesh);
-}
-
-function enterBuilderMode() {
-    currentMode = MODES.BUILDER;
-    switchUI('builder-ui');
-    if(scene.getObjectByName("previewChar")) scene.remove(scene.getObjectByName("previewChar"));
-    camera.position.set(0, 20, 20); camera.lookAt(0,0,0);
-    builderCamPitch = -0.5; builderCamYaw = 0;
-    updateGhostMesh();
-    document.exitPointerLock();
-}
-
-function updateHUD() {
-    const el = document.getElementById('role-display');
-    el.innerText = myRole.toUpperCase();
-    el.style.color = (myRole === 'captain' || myRole === 'skeleton') ? '#ff4444' : '#c8aa6e';
-}
-
-function switchUI(id) {
-    ['main-menu', 'lobby-screen', 'game-ui', 'end-screen', 'builder-ui'].forEach(s => document.getElementById(s).style.display = 'none');
-    document.getElementById(id).style.display = 'flex';
-    if(id === 'game-ui') document.getElementById(id).style.display = 'block'; 
-}
-
-function formatTime(s) {
-    const m = Math.floor(s/60);
-    const sec = s%60;
-    return `${m}:${sec<10?'0':''}${sec}`;
-}
-
-function showNotification(msg, color) { console.log(msg); }
-
-init();
+animate();

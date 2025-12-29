@@ -1,11 +1,9 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  root: '.', // root je u glavnom folderu
-  publicDir: 'public', // statički asseti
   build: {
-    outDir: 'dist', // output folder
-    emptyOutDir: true
+    outDir: 'dist',
+    assetsDir: 'assets',
   },
   server: {
     proxy: {

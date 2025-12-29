@@ -1,222 +1,206 @@
 const express = require('express');
 const http = require('http');
-const { Server } = require("socket.io");
+const { Server } = require('socket.io');
 const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server);
 
-// --- SERVIRANJE FAJLOVA (RENDER FIX) ---
-// 1. Serviraj static fajlove iz roota (za public folder)
-app.use(express.static(path.join(__dirname, 'public')));
-// 2. Serviraj dist ako postoji
 app.use(express.static(path.join(__dirname, 'dist')));
-// 3. Eksplicitno serviraj assets
-app.use('/assets', express.static(path.join(__dirname, 'public/assets')));
 
-const CONFIG = {
-    graceTime: 60,
-    gameDuration: 600,
-    minPlayers: 2
-};
+// GAME STATE
+let players = {};
+let gameState = 'LOBBY'; // LOBBY, COUNTDOWN, PLAYING, END
+let gameTimer = 0;
+let tasksCompleted = 0;
+const TOTAL_TASKS_REQUIRED = 10;
+let lobbyTimer = null;
 
-const GAME_STATE = { LOBBY: 0, GRACE: 1, PLAYING: 2, ENDED: 3 };
-
-const STATE = {
-    status: GAME_STATE.LOBBY,
-    players: {},
-    timer: 0,
-    tasksCompleted: 0,
-    tasksRequired: 0,
-    portalOpen: false,
-    mapConfig: { 
-        spawns: [{x:0, y:5, z:0}, {x:5, y:5, z:5}, {x:-5, y:5, z:-5}],
-        tasks: [],
-        portal: {x: 0, y: 2, z: 20}
-    }
-};
-
-let gameInterval = null;
+// Helper: Reset Game
+function resetGame() {
+    gameState = 'LOBBY';
+    tasksCompleted = 0;
+    Object.keys(players).forEach(id => {
+        players[id].role = 'LOBBY';
+        players[id].isReady = false;
+        players[id].hp = 100;
+        players[id].dead = false;
+        players[id].tasks = [];
+    });
+    io.emit('gameState', gameState);
+    io.emit('updatePlayers', players);
+}
 
 io.on('connection', (socket) => {
-    console.log('Player connected:', socket.id);
+    console.log('New player:', socket.id);
 
-    socket.on('joinLobby', (data) => {
-        // Late joiner = Spectator
-        if (STATE.status !== GAME_STATE.LOBBY) {
-            STATE.players[socket.id] = createPlayer(socket.id, data.name, 'spectator');
-            socket.emit('gameStart', { 
-                mapConfig: STATE.mapConfig, 
-                players: STATE.players, 
-                timeLeft: STATE.timer,
-                status: STATE.status,
-                isSpectator: true
-            });
-            return;
-        }
+    // Init player
+    players[socket.id] = {
+        id: socket.id,
+        x: 0, y: 0, z: 0,
+        rotation: 0,
+        role: 'LOBBY', // LOBBY, CREW, CAPTAIN, SKELETON, SPECTATOR
+        isReady: false,
+        hp: 100,
+        dead: false,
+        anim: 'Idle'
+    };
 
-        STATE.players[socket.id] = createPlayer(socket.id, data.name, 'survivor');
-        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
-    });
+    // Ako se spoji usred igre, ide u spectator
+    if (gameState === 'PLAYING') {
+        players[socket.id].role = 'SPECTATOR';
+        players[socket.id].dead = true;
+        socket.emit('forceSpectate');
+    }
 
+    io.emit('updatePlayers', players);
+
+    // Player Ready Logic
     socket.on('playerReady', () => {
-        if(STATE.players[socket.id]) {
-            STATE.players[socket.id].isReady = !STATE.players[socket.id].isReady;
-            io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
-            checkAutoStart();
-        }
+        if (gameState !== 'LOBBY') return;
+        players[socket.id].isReady = !players[socket.id].isReady;
+        io.emit('updatePlayers', players);
+        checkLobbyStart();
     });
 
-    socket.on('updatePos', (data) => {
-        const p = STATE.players[socket.id];
-        if(p && p.role !== 'spectator') {
-            p.x = data.x; p.y = data.y; p.z = data.z;
-            p.rot = data.rot; p.anim = data.anim;
-            socket.broadcast.volatile.emit('updatePlayer', p);
-        }
-    });
-
-    socket.on('completeTask', () => {
-        STATE.tasksCompleted++;
-        io.emit('taskUpdate', { completed: STATE.tasksCompleted, required: STATE.tasksRequired });
-        if(STATE.tasksCompleted >= STATE.tasksRequired && STATE.tasksRequired > 0) {
-            STATE.portalOpen = true;
-            io.emit('portalOpened', STATE.mapConfig.portal);
-        }
-    });
-
-    socket.on('attackPlayer', (targetId) => {
-        const attacker = STATE.players[socket.id];
-        const target = STATE.players[targetId];
+    // Movement & Animation Sync
+    socket.on('updateMove', (data) => {
+        if (!players[socket.id]) return;
+        players[socket.id].x = data.x;
+        players[socket.id].y = data.y;
+        players[socket.id].z = data.z;
+        players[socket.id].rotation = data.rotation;
+        players[socket.id].anim = data.anim;
         
-        if(!attacker || !target || STATE.status !== GAME_STATE.PLAYING) return;
-
-        if(attacker.role === 'captain' && target.role === 'survivor') {
-            target.role = 'skeleton';
-            io.emit('playerInfected', { id: targetId, role: 'skeleton' });
-            checkWinCondition();
-        }
-        else if(attacker.role === 'skeleton' && target.role === 'survivor') {
-            target.role = 'skeleton';
-            io.emit('playerInfected', { id: targetId, role: 'skeleton' });
-            checkWinCondition();
-        }
+        // Broadcast drugima (osim sebi da ne laga)
+        socket.broadcast.emit('playerMoved', players[socket.id]);
     });
 
-    socket.on('escape', () => {
-        if(STATE.portalOpen && STATE.players[socket.id]) {
-            io.emit('gameOver', { winner: 'SURVIVORS', reason: `${STATE.players[socket.id].name} escaped!` });
-            resetGame();
+    // Combat Logic
+    socket.on('attackHit', (targetId) => {
+        if (gameState !== 'PLAYING') return;
+        const attacker = players[socket.id];
+        const victim = players[targetId];
+
+        if (!attacker || !victim || attacker.dead || victim.dead) return;
+
+        // Captain zarazi Crew -> Skeleton
+        if (attacker.role === 'CAPTAIN' && victim.role === 'CREW') {
+            victim.hp -= 35; // 3 udarca ubijaju
+            if (victim.hp <= 0) {
+                victim.role = 'SKELETON';
+                victim.hp = 100;
+                victim.x = (Math.random() * 20) - 10; // Random respawn
+                victim.z = (Math.random() * 20) - 10;
+                io.emit('playerInfected', victim.id);
+                io.emit('chatMessage', `Player ${victim.id.substr(0,4)} is now a Skeleton!`);
+            }
         }
+        // Skeleton ubija Crew -> Spectator
+        else if (attacker.role === 'SKELETON' && victim.role === 'CREW') {
+            victim.hp -= 20;
+            if (victim.hp <= 0) {
+                victim.dead = true;
+                victim.role = 'SPECTATOR';
+                io.emit('playerDied', victim.id);
+            }
+        }
+        // Crew ne moze da bije (ili dodaj logiku za odbranu ovdje)
+
+        io.emit('updatePlayers', players);
+        checkWinCondition();
     });
 
-    socket.on('saveMapConfig', (cfg) => { 
-        STATE.mapConfig = cfg; 
-        console.log("Map config saved");
+    // Task Logic
+    socket.on('completeTask', () => {
+        if (gameState !== 'PLAYING') return;
+        tasksCompleted++;
+        io.emit('taskUpdate', { current: tasksCompleted, total: TOTAL_TASKS_REQUIRED });
+        
+        if (tasksCompleted >= TOTAL_TASKS_REQUIRED) {
+            io.emit('portalOpen');
+            // Ovdje bi isla logika da moraju do portala, ali za sad recimo da pobjedjuju
+            io.emit('gameOver', 'CREW WINS');
+            setTimeout(resetGame, 5000);
+        }
     });
 
     socket.on('disconnect', () => {
-        const p = STATE.players[socket.id];
-        if (p) {
-            const wasCaptain = (p.role === 'captain');
-            delete STATE.players[socket.id];
-            io.emit('playerLeft', socket.id);
-            io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
-            
-            if (STATE.status === GAME_STATE.PLAYING) {
-                if (wasCaptain) {
-                    io.emit('gameOver', { winner: 'SURVIVORS', reason: "The Captain fled!" });
-                    resetGame();
-                } else {
-                    checkWinCondition();
-                }
-            }
-        }
+        delete players[socket.id];
+        io.emit('updatePlayers', players);
     });
 });
 
-function createPlayer(id, name, role) {
-    return { id, name, role, isReady: false, x: 0, y: 10, z: 0, rot: 0, anim: 'Idle' };
+function checkLobbyStart() {
+    const playerIds = Object.keys(players);
+    const readyCount = playerIds.filter(id => players[id].isReady).length;
+    const totalCount = playerIds.length;
+
+    if (totalCount === 0) return;
+
+    // Svi spremni
+    if (readyCount === totalCount && totalCount >= 2) { 
+        startCountdown();
+    } 
+    // Vise od 15 ljudi
+    else if (totalCount >= 15 && !lobbyTimer) {
+        // Auto start za 60 sekundi
+        lobbyTimer = setTimeout(startCountdown, 60000);
+    }
 }
 
-function checkAutoStart() {
-    const players = Object.values(STATE.players);
-    const readyCount = players.filter(p => p.isReady).length;
-    if(players.length >= CONFIG.minPlayers && readyCount === players.length) {
-        startGame();
-    }
+function startCountdown() {
+    gameState = 'COUNTDOWN';
+    io.emit('gameState', 'COUNTDOWN');
+    let count = 3;
+    let int = setInterval(() => {
+        io.emit('timer', count);
+        count--;
+        if (count < 0) {
+            clearInterval(int);
+            startGame();
+        }
+    }, 1000);
 }
 
 function startGame() {
-    STATE.status = GAME_STATE.GRACE;
-    STATE.timer = CONFIG.graceTime;
-    STATE.tasksCompleted = 0;
-    STATE.tasksRequired = Object.keys(STATE.players).length * 2; 
-    STATE.portalOpen = false;
-
-    const pArray = Object.values(STATE.players);
-    pArray.forEach((p, i) => {
-        const spawn = STATE.mapConfig.spawns[i % STATE.mapConfig.spawns.length] || {x:0, y:5, z:0};
-        p.x = spawn.x; p.y = spawn.y + 2; p.z = spawn.z; 
-        p.role = 'survivor';
-    });
-
-    io.emit('gameStart', { 
-        mapConfig: STATE.mapConfig, 
-        players: STATE.players,
-        status: STATE.status,
-        timeLeft: STATE.timer
-    });
-
-    if(gameInterval) clearInterval(gameInterval);
-    gameInterval = setInterval(gameLoop, 1000);
-}
-
-function gameLoop() {
-    STATE.timer--;
-    io.emit('timerUpdate', STATE.timer);
-
-    if (STATE.status === GAME_STATE.GRACE) {
-        if (STATE.timer <= 0) startInfection();
-    } else if (STATE.status === GAME_STATE.PLAYING) {
-        if (STATE.timer <= 0) {
-            io.emit('gameOver', { winner: 'INFECTED', reason: "Time ran out!" });
-            resetGame();
+    gameState = 'PLAYING';
+    tasksCompleted = 0;
+    
+    const ids = Object.keys(players);
+    // Odaberi Random Captain-a
+    const captainIndex = Math.floor(Math.random() * ids.length);
+    
+    ids.forEach((id, index) => {
+        players[id].isReady = false;
+        players[id].dead = false;
+        players[id].hp = 100;
+        
+        if (index === captainIndex) {
+            players[id].role = 'CAPTAIN'; // Initially hidden usually, but for now specific
+        } else {
+            players[id].role = 'CREW';
         }
-    }
-}
+    });
 
-function startInfection() {
-    STATE.status = GAME_STATE.PLAYING;
-    STATE.timer = CONFIG.gameDuration; 
-    const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
-    if(survivors.length > 0) {
-        const captain = survivors[Math.floor(Math.random() * survivors.length)];
-        captain.role = 'captain';
-        io.emit('infectionStarted', { captainId: captain.id, timeLeft: STATE.timer });
-    } else {
-        io.emit('gameOver', { winner: 'DRAW', reason: "Not enough players." });
-        resetGame();
-    }
+    io.emit('gameState', 'PLAYING');
+    io.emit('updatePlayers', players);
+    
+    // 30 sekundi grace perioda pa Infected krece da siri zarazu (visual effect)
+    setTimeout(() => {
+        io.emit('infectionStart'); // Client pali crveni trag
+    }, 30000);
 }
 
 function checkWinCondition() {
-    const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
-    if(survivors.length === 0) {
-        io.emit('gameOver', { winner: 'INFECTED', reason: "All survivors infected!" });
-        resetGame();
+    const ids = Object.keys(players);
+    const crewAlive = ids.filter(id => players[id].role === 'CREW' && !players[id].dead).length;
+    
+    if (crewAlive === 0) {
+        io.emit('gameOver', 'INFECTED WIN');
+        setTimeout(resetGame, 5000);
     }
-}
-
-function resetGame() {
-    clearInterval(gameInterval);
-    STATE.status = GAME_STATE.ENDED;
-    setTimeout(() => {
-        STATE.status = GAME_STATE.LOBBY;
-        Object.values(STATE.players).forEach(p => { p.isReady = false; p.role = 'survivor'; });
-        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
-    }, 5000);
 }
 
 const PORT = process.env.PORT || 3000;
