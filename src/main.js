@@ -26,7 +26,7 @@ dirLight.castShadow = true;
 scene.add(dirLight);
 
 // GAME VARIABLES
-const players = {}; // Local representation of other players
+const players = {}; 
 let myId = null;
 let myModel = null;
 let mixer = null;
@@ -34,6 +34,7 @@ let animations = {};
 let currentAction = 'Idle';
 let isSpectator = false;
 let myRole = 'LOBBY';
+let gameState = 'LOBBY'; // <--- OVO JE NEDOSTAJALO
 
 // ASSETS
 const loader = new GLTFLoader();
@@ -41,19 +42,23 @@ let assets = { character: null, enemy: null, map: null };
 
 // LOADING MANAGER
 async function loadAssets() {
-    // Load Map
-    const mapData = await loader.loadAsync('/map.glb');
-    scene.add(mapData.scene);
-    
-    // Load Character (Survivor/Captain)
-    const charData = await loader.loadAsync('/character.gltf');
-    assets.character = charData;
+    try {
+        // Load Map
+        const mapData = await loader.loadAsync('/map.glb');
+        scene.add(mapData.scene);
+        
+        // Load Character (Survivor/Captain)
+        const charData = await loader.loadAsync('/character.gltf');
+        assets.character = charData;
 
-    // Load Enemy (Skeleton)
-    const enemyData = await loader.loadAsync('/assets/enemy.gltf');
-    assets.enemy = enemyData;
-    
-    console.log("Assets loaded!");
+        // Load Enemy (Skeleton)
+        const enemyData = await loader.loadAsync('/assets/enemy.gltf');
+        assets.enemy = enemyData;
+        
+        console.log("Assets loaded!");
+    } catch (error) {
+        console.error("Error loading models:", error);
+    }
 }
 loadAssets();
 
@@ -61,7 +66,6 @@ loadAssets();
 const controls = new PointerLockControls(camera, document.body);
 const moveState = { forward: false, backward: false, left: false, right: false, jump: false, sprint: false };
 const velocity = new THREE.Vector3();
-const direction = new THREE.Vector3();
 
 // DOM ELEMENTS
 const menu = document.getElementById('main-menu');
@@ -74,12 +78,12 @@ const btnReady = document.getElementById('btn-ready');
 btnFind.addEventListener('click', () => {
     menu.classList.add('hidden');
     lobby.classList.remove('hidden');
-    controls.lock(); // Start accepting input context
+    controls.lock(); 
 });
 
 btnReady.addEventListener('click', () => {
     socket.emit('playerReady');
-    btnReady.classList.toggle('ready-btn-active'); // Add visual feedback via CSS if needed
+    btnReady.style.borderColor = "#00ff00"; // Visual feedback
 });
 
 document.addEventListener('keydown', (e) => {
@@ -89,9 +93,9 @@ document.addEventListener('keydown', (e) => {
         case 'KeyA': moveState.left = true; break;
         case 'KeyS': moveState.backward = true; break;
         case 'KeyD': moveState.right = true; break;
-        case 'Space': if (velocity.y === 0) velocity.y = 15; break; // Simple jump
+        case 'Space': if (velocity.y === 0) velocity.y = 15; break; 
         case 'ShiftLeft': moveState.sprint = true; break;
-        case 'KeyE': socket.emit('completeTask'); break; // Task logic simplified
+        case 'KeyE': socket.emit('completeTask'); break; 
     }
 });
 document.addEventListener('keyup', (e) => {
@@ -107,17 +111,24 @@ document.addEventListener('keyup', (e) => {
 document.addEventListener('mousedown', () => {
     if(!controls.isLocked) controls.lock();
     if(myRole !== 'SPECTATOR' && myRole !== 'LOBBY') {
-        playAnim('Punch'); // Ili Sword ako imas
-        // Attack logic
-        socket.emit('attackSwing');
-        // Simple Raycast attack
+        playAnim('Punch'); 
+        
+        // Raycast attack logic
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+        
+        // Find intersections
         const intersects = raycaster.intersectObjects(scene.children, true);
         
         for (let i = 0; i < intersects.length; i++) {
-            if (intersects[i].distance < 3 && intersects[i].object.userData.playerId) {
-                socket.emit('attackHit', intersects[i].object.userData.playerId);
+            // Find root object (player model)
+            let obj = intersects[i].object;
+            while(obj.parent && !obj.userData.playerId) {
+                obj = obj.parent;
+            }
+
+            if (intersects[i].distance < 3 && obj.userData.playerId && obj.userData.playerId !== myId) {
+                socket.emit('attackHit', obj.userData.playerId);
                 break;
             }
         }
@@ -130,10 +141,12 @@ socket.on('connect', () => { myId = socket.id; });
 socket.on('updatePlayers', (serverPlayers) => {
     // Update UI List in Lobby
     const list = document.getElementById('player-list');
-    list.innerHTML = '';
-    Object.values(serverPlayers).forEach(p => {
-        list.innerHTML += `<div class="${p.isReady ? 'ready' : 'not-ready'}">Player ${p.id.substr(0,4)}</div>`;
-    });
+    if(list) {
+        list.innerHTML = '';
+        Object.values(serverPlayers).forEach(p => {
+            list.innerHTML += `<div class="${p.isReady ? 'ready' : 'not-ready'}">Player ${p.id.substr(0,4)} ${p.isReady ? '(READY)' : ''}</div>`;
+        });
+    }
 
     // Handle 3D Models
     Object.keys(serverPlayers).forEach(id => {
@@ -144,55 +157,64 @@ socket.on('updatePlayers', (serverPlayers) => {
             if (myRole !== pData.role) {
                 myRole = pData.role;
                 updateRoleUI(pData.role);
-                // Respawn logic (re-create model if needed)
-                if (pData.role === 'SKELETON' || pData.role === 'CAPTAIN') createMyPlayer(pData.role);
+                if (pData.role === 'SKELETON') createMyPlayer(pData.role);
+                if (pData.role === 'CAPTAIN') createMyPlayer(pData.role);
+                if (pData.role === 'SPECTATOR') {
+                    isSpectator = true;
+                    if(myModel) scene.remove(myModel);
+                }
             }
             // Update HP UI
-            document.getElementById('hp-bar-fill').style.width = pData.hp + '%';
+            const hpBar = document.getElementById('hp-bar-fill');
+            if(hpBar) hpBar.style.width = pData.hp + '%';
             return; 
         }
 
         // Other players
         if (!players[id]) {
             // Create new player mesh
+            if (!assets.character || !assets.enemy) return; // Wait for load
+
             let model = null;
             if (pData.role === 'SKELETON') model = assets.enemy.scene.clone();
             else model = assets.character.scene.clone();
 
             model.position.set(pData.x, pData.y, pData.z);
-            model.userData.playerId = id; // For raycasting
+            model.userData.playerId = id; 
             scene.add(model);
             players[id] = { mesh: model, role: pData.role };
         } else {
             // Update position
             const p = players[id];
-            p.mesh.position.lerp(new THREE.Vector3(pData.x, pData.y, pData.z), 0.1);
-            p.mesh.rotation.y = pData.rotation;
-            
-            // Check if model needs swap (e.g. became infected)
-            if (p.role !== pData.role) {
-                scene.remove(p.mesh);
-                let newModel = (pData.role === 'SKELETON') ? assets.enemy.scene.clone() : assets.character.scene.clone();
-                scene.add(newModel);
-                players[id].mesh = newModel;
-                players[id].role = pData.role;
+            if(p.mesh) {
+                p.mesh.position.lerp(new THREE.Vector3(pData.x, pData.y, pData.z), 0.2);
+                p.mesh.rotation.y = pData.rotation;
+                
+                // Check if model needs swap (e.g. became infected)
+                if (p.role !== pData.role) {
+                    scene.remove(p.mesh);
+                    let newModel = (pData.role === 'SKELETON') ? assets.enemy.scene.clone() : assets.character.scene.clone();
+                    newModel.position.copy(p.mesh.position);
+                    newModel.userData.playerId = id;
+                    scene.add(newModel);
+                    players[id].mesh = newModel;
+                    players[id].role = pData.role;
+                }
             }
-            
-            // Captain Trail Logic
-            if (pData.role === 'CAPTAIN') spawnTrail(p.mesh.position);
         }
     });
 
     // Remove disconnected
     Object.keys(players).forEach(id => {
         if (!serverPlayers[id]) {
-            scene.remove(players[id].mesh);
+            if(players[id].mesh) scene.remove(players[id].mesh);
             delete players[id];
         }
     });
 });
 
 socket.on('gameState', (state) => {
+    gameState = state; // AZURIRAMO STATE
     if (state === 'PLAYING') {
         lobby.classList.add('hidden');
         hud.classList.remove('hidden');
@@ -208,7 +230,8 @@ socket.on('timer', (time) => {
 
 socket.on('taskUpdate', (data) => {
     const pct = (data.current / data.total) * 100;
-    document.getElementById('task-bar-fill').style.width = pct + '%';
+    const taskBar = document.getElementById('task-bar-fill');
+    if(taskBar) taskBar.style.width = pct + '%';
 });
 
 socket.on('gameOver', (msg) => {
@@ -221,19 +244,20 @@ socket.on('gameOver', (msg) => {
 // HELPERS
 function createMyPlayer(role) {
     if (myModel) scene.remove(myModel);
-    
-    // Select model based on role
-    const source = (role === 'SKELETON') ? assets.enemy : assets.character;
-    if (!source) return;
+    if (!assets.character || !assets.enemy) return;
 
+    const source = (role === 'SKELETON') ? assets.enemy : assets.character;
+    
     myModel = source.scene.clone();
     scene.add(myModel);
     
     // Setup Animations
     mixer = new THREE.AnimationMixer(myModel);
-    source.animations.forEach((clip) => {
-        animations[clip.name] = mixer.clipAction(clip);
-    });
+    if(source.animations) {
+        source.animations.forEach((clip) => {
+            animations[clip.name] = mixer.clipAction(clip);
+        });
+    }
     playAnim('Idle');
     
     // Reset Camera
@@ -241,25 +265,21 @@ function createMyPlayer(role) {
 }
 
 function playAnim(name) {
+    if(!animations[name]) return;
     if (currentAction === name) return;
+    
     if (animations[currentAction]) animations[currentAction].fadeOut(0.2);
-    if (animations[name]) {
-        animations[name].reset().fadeIn(0.2).play();
-        currentAction = name;
-    }
+    animations[name].reset().fadeIn(0.2).play();
+    currentAction = name;
 }
 
 function updateRoleUI(role) {
     const el = document.getElementById('role-display');
+    if(!el) return;
     el.innerText = role;
     if(role === 'CAPTAIN') el.style.color = 'red';
     else if (role === 'SKELETON') el.style.color = 'purple';
     else el.style.color = 'cyan';
-}
-
-function spawnTrail(pos) {
-    // Simple particle logic could go here
-    // For now assume Three.js points or sprites
 }
 
 // GAME LOOP
@@ -271,12 +291,12 @@ function animate() {
 
     if (gameState === 'PLAYING' && myModel && !isSpectator) {
         // Movement Logic
-        if (moveState.forward) velocity.z = moveState.sprint ? 15 : 8;
-        else if (moveState.backward) velocity.z = -5;
+        if (moveState.forward) velocity.z = moveState.sprint ? 12 : 6;
+        else if (moveState.backward) velocity.z = -4;
         else velocity.z = 0;
 
-        if (moveState.left) velocity.x = -5;
-        else if (moveState.right) velocity.x = 5;
+        if (moveState.left) velocity.x = -4;
+        else if (moveState.right) velocity.x = 4;
         else velocity.x = 0;
 
         // Apply movement relative to camera direction
@@ -286,13 +306,12 @@ function animate() {
         camDir.normalize();
         
         const moveVec = new THREE.Vector3();
-        moveVec.add(camDir.clone().multiplyScalar(velocity.z * delta)); // Forward/Back
+        moveVec.add(camDir.clone().multiplyScalar(velocity.z * delta)); 
         
         const sideDir = new THREE.Vector3(-camDir.z, 0, camDir.x);
-        moveVec.add(sideDir.clone().multiplyScalar(velocity.x * delta)); // Strafe
+        moveVec.add(sideDir.clone().multiplyScalar(velocity.x * delta));
 
         myModel.position.add(moveVec);
-        myModel.position.y = 0; // Lock to floor for simplicity (use collision for real map)
         
         // Rotate model to face move direction
         if (velocity.length() > 0) {

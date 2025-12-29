@@ -12,7 +12,6 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // GAME STATE
 let players = {};
 let gameState = 'LOBBY'; // LOBBY, COUNTDOWN, PLAYING, END
-let gameTimer = 0;
 let tasksCompleted = 0;
 const TOTAL_TASKS_REQUIRED = 10;
 let lobbyTimer = null;
@@ -40,14 +39,13 @@ io.on('connection', (socket) => {
         id: socket.id,
         x: 0, y: 0, z: 0,
         rotation: 0,
-        role: 'LOBBY', // LOBBY, CREW, CAPTAIN, SKELETON, SPECTATOR
+        role: 'LOBBY', 
         isReady: false,
         hp: 100,
         dead: false,
         anim: 'Idle'
     };
 
-    // Ako se spoji usred igre, ide u spectator
     if (gameState === 'PLAYING') {
         players[socket.id].role = 'SPECTATOR';
         players[socket.id].dead = true;
@@ -59,7 +57,7 @@ io.on('connection', (socket) => {
     // Player Ready Logic
     socket.on('playerReady', () => {
         if (gameState !== 'LOBBY') return;
-        players[socket.id].isReady = !players[socket.id].isReady;
+        if(players[socket.id]) players[socket.id].isReady = !players[socket.id].isReady;
         io.emit('updatePlayers', players);
         checkLobbyStart();
     });
@@ -73,7 +71,6 @@ io.on('connection', (socket) => {
         players[socket.id].rotation = data.rotation;
         players[socket.id].anim = data.anim;
         
-        // Broadcast drugima (osim sebi da ne laga)
         socket.broadcast.emit('playerMoved', players[socket.id]);
     });
 
@@ -87,13 +84,10 @@ io.on('connection', (socket) => {
 
         // Captain zarazi Crew -> Skeleton
         if (attacker.role === 'CAPTAIN' && victim.role === 'CREW') {
-            victim.hp -= 35; // 3 udarca ubijaju
+            victim.hp -= 35; 
             if (victim.hp <= 0) {
                 victim.role = 'SKELETON';
                 victim.hp = 100;
-                victim.x = (Math.random() * 20) - 10; // Random respawn
-                victim.z = (Math.random() * 20) - 10;
-                io.emit('playerInfected', victim.id);
                 io.emit('chatMessage', `Player ${victim.id.substr(0,4)} is now a Skeleton!`);
             }
         }
@@ -106,7 +100,6 @@ io.on('connection', (socket) => {
                 io.emit('playerDied', victim.id);
             }
         }
-        // Crew ne moze da bije (ili dodaj logiku za odbranu ovdje)
 
         io.emit('updatePlayers', players);
         checkWinCondition();
@@ -119,8 +112,6 @@ io.on('connection', (socket) => {
         io.emit('taskUpdate', { current: tasksCompleted, total: TOTAL_TASKS_REQUIRED });
         
         if (tasksCompleted >= TOTAL_TASKS_REQUIRED) {
-            io.emit('portalOpen');
-            // Ovdje bi isla logika da moraju do portala, ali za sad recimo da pobjedjuju
             io.emit('gameOver', 'CREW WINS');
             setTimeout(resetGame, 5000);
         }
@@ -139,13 +130,10 @@ function checkLobbyStart() {
 
     if (totalCount === 0) return;
 
-    // Svi spremni
     if (readyCount === totalCount && totalCount >= 2) { 
         startCountdown();
     } 
-    // Vise od 15 ljudi
     else if (totalCount >= 15 && !lobbyTimer) {
-        // Auto start za 60 sekundi
         lobbyTimer = setTimeout(startCountdown, 60000);
     }
 }
@@ -169,7 +157,6 @@ function startGame() {
     tasksCompleted = 0;
     
     const ids = Object.keys(players);
-    // Odaberi Random Captain-a
     const captainIndex = Math.floor(Math.random() * ids.length);
     
     ids.forEach((id, index) => {
@@ -178,7 +165,7 @@ function startGame() {
         players[id].hp = 100;
         
         if (index === captainIndex) {
-            players[id].role = 'CAPTAIN'; // Initially hidden usually, but for now specific
+            players[id].role = 'CAPTAIN'; 
         } else {
             players[id].role = 'CREW';
         }
@@ -186,11 +173,6 @@ function startGame() {
 
     io.emit('gameState', 'PLAYING');
     io.emit('updatePlayers', players);
-    
-    // 30 sekundi grace perioda pa Infected krece da siri zarazu (visual effect)
-    setTimeout(() => {
-        io.emit('infectionStart'); // Client pali crveni trag
-    }, 30000);
 }
 
 function checkWinCondition() {
