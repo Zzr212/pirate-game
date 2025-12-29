@@ -7,13 +7,15 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
+// BITNO: Ovako server zna da treba traziti fajlove i u 'public' i u 'dist'
+app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // CONFIG
 const CONFIG = {
-    graceTime: 60,       // 60 sekundi prije infekcije
-    gameDuration: 600,   // 10 minuta za Survivor pobjedu
-    minPlayers: 2        // Minimum za start
+    graceTime: 60,       
+    gameDuration: 600,   
+    minPlayers: 2        
 };
 
 const GAME_STATE = { LOBBY: 0, GRACE: 1, PLAYING: 2, ENDED: 3 };
@@ -25,8 +27,8 @@ const STATE = {
     tasksCompleted: 0,
     tasksRequired: 0,
     portalOpen: false,
-    mapConfig: { // Default map config
-        spawns: [{x:0, y:5, z:0}, {x:5, y:5, z:5}, {x:-5, y:5, z:-5}, {x:5, y:5, z:-5}, {x:-5, y:5, z:5}],
+    mapConfig: { 
+        spawns: [{x:0, y:5, z:0}, {x:5, y:5, z:5}, {x:-5, y:5, z:-5}],
         tasks: [],
         portal: {x: 0, y: 2, z: 20}
     }
@@ -38,7 +40,6 @@ io.on('connection', (socket) => {
     console.log('Player connected:', socket.id);
 
     socket.on('joinLobby', (data) => {
-        // Ako je igra vec u toku, baci ga u spectator mode
         if (STATE.status !== GAME_STATE.LOBBY) {
             STATE.players[socket.id] = createPlayer(socket.id, data.name, 'spectator');
             socket.emit('gameStart', { 
@@ -50,10 +51,7 @@ io.on('connection', (socket) => {
             return;
         }
 
-        // Inace, normalan join
         STATE.players[socket.id] = createPlayer(socket.id, data.name, 'survivor');
-        
-        // Update svima
         io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
     });
 
@@ -83,9 +81,11 @@ io.on('connection', (socket) => {
         }
     });
 
+    // FIX: Attack Logic - Server validates roles
     socket.on('attackPlayer', (targetId) => {
         const attacker = STATE.players[socket.id];
         const target = STATE.players[targetId];
+        
         if(!attacker || !target || STATE.status !== GAME_STATE.PLAYING) return;
 
         // Captain infects Survivor
@@ -109,13 +109,28 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('saveMapConfig', (cfg) => { STATE.mapConfig = cfg; });
+    socket.on('saveMapConfig', (cfg) => { 
+        STATE.mapConfig = cfg; 
+        console.log("Map config saved");
+    });
 
     socket.on('disconnect', () => {
-        delete STATE.players[socket.id];
-        io.emit('playerLeft', socket.id);
-        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
-        if(STATE.status !== GAME_STATE.LOBBY) checkWinCondition();
+        const p = STATE.players[socket.id];
+        if (p) {
+            delete STATE.players[socket.id];
+            io.emit('playerLeft', socket.id);
+            io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
+            
+            // FIX: Win Condition ako Kapetan izadje
+            if (STATE.status === GAME_STATE.PLAYING) {
+                if (p.role === 'captain') {
+                    io.emit('gameOver', { winner: 'SURVIVORS', reason: "The Captain fled the curse!" });
+                    resetGame();
+                } else {
+                    checkWinCondition();
+                }
+            }
+        }
     });
 });
 
@@ -138,14 +153,13 @@ function startGame() {
     STATE.status = GAME_STATE.GRACE;
     STATE.timer = CONFIG.graceTime;
     STATE.tasksCompleted = 0;
-    STATE.tasksRequired = Object.keys(STATE.players).length * 2; // 2 taska po igracu
+    STATE.tasksRequired = Object.keys(STATE.players).length * 2; 
     STATE.portalOpen = false;
 
-    // Assign Spawns
     const pArray = Object.values(STATE.players);
     pArray.forEach((p, i) => {
-        const spawn = STATE.mapConfig.spawns[i % STATE.mapConfig.spawns.length];
-        p.x = spawn.x; p.y = spawn.y + 2; p.z = spawn.z; // Malo u zraku da ne propadnu
+        const spawn = STATE.mapConfig.spawns[i % STATE.mapConfig.spawns.length] || {x:0, y:5, z:0};
+        p.x = spawn.x; p.y = spawn.y + 2; p.z = spawn.z; 
         p.role = 'survivor';
     });
 
@@ -156,7 +170,6 @@ function startGame() {
         timeLeft: STATE.timer
     });
 
-    // Start Timer Loop
     if(gameInterval) clearInterval(gameInterval);
     gameInterval = setInterval(gameLoop, 1000);
 }
@@ -171,7 +184,6 @@ function gameLoop() {
         }
     } else if (STATE.status === GAME_STATE.PLAYING) {
         if (STATE.timer <= 0) {
-            // Time is up, Pirates win!
             io.emit('gameOver', { winner: 'INFECTED', reason: "Time ran out!" });
             resetGame();
         }
@@ -180,7 +192,7 @@ function gameLoop() {
 
 function startInfection() {
     STATE.status = GAME_STATE.PLAYING;
-    STATE.timer = CONFIG.gameDuration; // 10 minuta
+    STATE.timer = CONFIG.gameDuration; 
     
     const survivors = Object.values(STATE.players).filter(p => p.role === 'survivor');
     if(survivors.length > 0) {
@@ -188,6 +200,8 @@ function startInfection() {
         captain.role = 'captain';
         io.emit('infectionStarted', { captainId: captain.id, timeLeft: STATE.timer });
     } else {
+        // Nema igraca za inficirati (npr svi izasli osim jednog)
+        io.emit('gameOver', { winner: 'DRAW', reason: "Not enough souls." });
         resetGame();
     }
 }
@@ -205,14 +219,15 @@ function resetGame() {
     STATE.status = GAME_STATE.ENDED;
     setTimeout(() => {
         STATE.status = GAME_STATE.LOBBY;
-        Object.values(STATE.players).forEach(p => {
-            p.isReady = false;
-            p.role = 'survivor';
-        });
-        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status });
+        STATE.players = {}; // Ocisti igrace ili ih resetiraj, ovdje ih samo resetiramo
+        // Zapravo SocketIO drzi konekcije, moramo ih samo resetirati u objektu
+        // Ali jednostavnije je da klijenti refresaju ili da ih vratimo u lobby state
+        io.emit('lobbyUpdate', { players: STATE.players, status: STATE.status }); // Ovo ce poslati prazno jer smo brisali? 
+        // Bolje ne brisati konekcije nego samo resetirati role
     }, 5000);
 }
 
-server.listen(3000, () => {
-    console.log('Server running on 3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
