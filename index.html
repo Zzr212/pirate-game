@@ -3,57 +3,57 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pirate Infection</title>
+    <title>Cursed Crew - 3D Multiplayer</title>
     <link rel="stylesheet" href="./src/style.css">
 </head>
 <body>
     <div id="ui-layer">
+        
+        <!-- LOADING -->
+        <div id="loading-screen">
+            <h1>LOADING...</h1>
+        </div>
+
         <!-- MAIN MENU -->
-        <div id="main-menu">
+        <div id="main-menu" class="hidden">
             <h1>CURSED CREW</h1>
-            <button id="btn-find-match">FIND MATCH</button>
+            <p style="opacity: 0.7; letter-spacing: 2px;">SURVIVE THE INFECTED</p>
+            <br>
+            <button id="btn-find">FIND MATCH</button>
         </div>
 
         <!-- LOBBY -->
         <div id="lobby-screen" class="hidden">
-            <h2>LOBBY</h2>
+            <h2>SHIP'S QUARTERS</h2>
             <div id="player-list"></div>
-            <button id="btn-ready">READY</button>
-            <div id="countdown" class="hidden">3</div>
+            <button id="btn-ready">TOGGLE READY</button>
+            <div id="timer-display" class="hidden"></div>
         </div>
 
-        <!-- HUD (IN GAME) -->
+        <!-- IN-GAME HUD -->
         <div id="hud" class="hidden">
-            <div id="role-display">WAITING FOR ROLE...</div>
+            <div id="role-text">CREW</div>
             
-            <div id="task-panel">
-                <h3>TASKS</h3>
-                <div id="task-bar-container"><div id="task-bar-fill"></div></div>
-                <ul id="task-list">
-                    <li>Find Gold Coins (Press E)</li>
-                </ul>
+            <div id="task-container">
+                <h3 style="margin:0; color: var(--accent);">MISSION PROGRESS</h3>
+                <p>Tasks completed to escape.</p>
             </div>
 
-            <div id="bottom-left">
-                <div id="hp-bar-container">
-                    <div id="hp-bar-fill"></div>
-                    <span>HP</span>
-                </div>
-                <div id="quick-slots">
-                    <div class="slot">1</div>
-                    <div class="slot">2</div>
-                    <div class="slot">3</div>
-                    <div class="slot">4</div>
-                </div>
+            <div id="bottom-right">
+                <h2 style="margin:0;">HEALTH</h2>
+                <div id="hp-bar"><div id="hp-fill"></div></div>
             </div>
-            
-            <div id="interaction-msg" class="hidden">PRESS E TO INTERACT</div>
+
+            <div style="position: absolute; bottom: 30px; left: 30px; opacity: 0.6;">
+                <p>WASD - Move | SHIFT - Run | CLICK - Attack | E - Interact</p>
+            </div>
         </div>
 
-        <!-- GAME OVER -->
+        <!-- END SCREEN -->
         <div id="game-over" class="hidden">
-            <h1 id="winner-text"></h1>
+            <h1 id="winner-text">GAME OVER</h1>
         </div>
+
     </div>
     
     <script type="module" src="./src/main.js"></script>

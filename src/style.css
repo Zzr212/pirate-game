@@ -1,77 +1,156 @@
-@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700&family=Roboto:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@700;900&family=Pirata+One&family=Roboto:wght@400;700&display=swap');
 
-body { margin: 0; overflow: hidden; font-family: 'Roboto', sans-serif; background: #000; color: white; }
+:root {
+    --primary: #c0392b;
+    --secondary: #2c3e50;
+    --accent: #f1c40f;
+    --glass: rgba(0, 0, 0, 0.8);
+}
+
+body {
+    margin: 0;
+    overflow: hidden;
+    font-family: 'Roboto', sans-serif;
+    background: #111;
+    user-select: none;
+}
+
 canvas { display: block; }
 
 .hidden { display: none !important; }
 
-#ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
-button { pointer-events: all; cursor: pointer; }
-
-/* MAIN MENU */
-#main-menu, #lobby-screen, #game-over {
+/* LAYOUTS */
+#ui-layer {
     position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    background: rgba(0, 0, 0, 0.85);
-    display: flex; flex-direction: column; justify-content: center; align-items: center;
-    pointer-events: all;
+    pointer-events: none;
+    z-index: 10;
 }
 
-h1, h2 { font-family: 'Cinzel', serif; letter-spacing: 5px; text-shadow: 0 0 10px #ff3333; }
-h1 { font-size: 4rem; color: #ff3333; }
+/* MENUS */
+#loading-screen, #main-menu, #lobby-screen, #game-over {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background: radial-gradient(circle, #2c3e50 0%, #000000 100%);
+    display: flex; flex-direction: column; 
+    justify-content: center; align-items: center;
+    pointer-events: all;
+    color: white;
+}
+
+h1 {
+    font-family: 'Pirata One', cursive;
+    font-size: 6rem;
+    color: var(--primary);
+    text-shadow: 0 0 20px black;
+    margin-bottom: 0;
+    animation: pulse 2s infinite;
+}
 
 button {
-    background: rgba(255, 0, 0, 0.2); border: 2px solid #ff3333;
-    color: white; padding: 15px 40px; font-size: 1.5rem; font-family: 'Cinzel', serif;
+    background: transparent;
+    border: 3px solid var(--primary);
+    color: var(--primary);
+    font-family: 'Cinzel', serif;
+    font-size: 1.5rem;
+    padding: 15px 50px;
+    cursor: pointer;
     transition: 0.3s;
+    text-shadow: 0 0 5px black;
+    box-shadow: 0 0 15px rgba(192, 57, 43, 0.3);
 }
-button:hover { background: #ff3333; color: black; box-shadow: 0 0 20px #ff3333; }
 
-#player-list { margin: 20px; font-size: 1.2rem; }
-.ready { color: #00ff00; }
-.not-ready { color: #ff0000; }
+button:hover {
+    background: var(--primary);
+    color: white;
+    box-shadow: 0 0 30px var(--primary);
+    transform: scale(1.05);
+}
+
+/* LOBBY */
+#lobby-screen h2 {
+    font-family: 'Cinzel', serif;
+    font-size: 3rem;
+    border-bottom: 2px solid var(--accent);
+}
+
+#player-list {
+    width: 400px;
+    height: 300px;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid #555;
+    margin: 20px;
+    padding: 10px;
+    overflow-y: auto;
+}
+
+.lobby-item {
+    padding: 10px;
+    border-bottom: 1px solid #333;
+    font-size: 1.2rem;
+    color: #aaa;
+}
+.lobby-item.ready {
+    color: #2ecc71;
+    font-weight: bold;
+    text-shadow: 0 0 5px #2ecc71;
+}
+
+#timer-display {
+    position: absolute; top: 20%;
+    font-size: 8rem; color: var(--accent);
+    font-family: 'Pirata One', cursive;
+    animation: zoomIn 0.5s ease;
+}
 
 /* HUD */
-#hud { width: 100%; height: 100%; }
-
-#role-display {
-    position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
-    font-family: 'Cinzel', serif; font-size: 2rem;
-    text-shadow: 0 0 5px black;
+#hud {
+    width: 100%; height: 100%;
+    pointer-events: none;
 }
 
-#task-panel {
+#role-text {
+    position: absolute; top: 30px; width: 100%;
+    text-align: center;
+    font-family: 'Cinzel', serif; font-size: 3rem;
+    text-shadow: 2px 2px 0 #000;
+}
+.captain { color: #e74c3c; }
+.crew { color: #3498db; }
+.skeleton { color: #9b59b6; }
+
+#bottom-right {
+    position: absolute; bottom: 30px; right: 30px;
+    text-align: right;
+}
+
+#hp-bar {
+    width: 300px; height: 30px;
+    background: #333;
+    border: 2px solid #fff;
+    transform: skewX(-20deg);
+    overflow: hidden;
+}
+
+#hp-fill {
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, #c0392b, #e74c3c);
+    transition: width 0.3s;
+}
+
+#task-container {
     position: absolute; top: 20px; right: 20px;
-    background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px;
-    text-align: right; width: 250px;
-}
-#task-bar-container { width: 100%; height: 10px; background: #333; margin-bottom: 10px; }
-#task-bar-fill { height: 100%; width: 0%; background: #00ff00; transition: width 0.5s; }
-
-#bottom-left {
-    position: absolute; bottom: 20px; left: 20px;
-    display: flex; flex-direction: column; gap: 10px;
+    background: rgba(0,0,0,0.6);
+    padding: 15px;
+    border-left: 4px solid var(--accent);
 }
 
-#hp-bar-container {
-    width: 300px; height: 30px; background: #333; border: 2px solid white;
-    position: relative; clip-path: polygon(0 0, 100% 0, 95% 100%, 0% 100%);
-}
-#hp-bar-fill {
-    width: 100%; height: 100%; background: #ff0000;
-    transition: width 0.2s;
-}
-#hp-bar-container span {
-    position: absolute; left: 10px; top: 5px; font-weight: bold; z-index: 2;
+/* ANIMATIONS */
+@keyframes pulse {
+    0% { transform: scale(1); text-shadow: 0 0 10px var(--primary); }
+    50% { transform: scale(1.05); text-shadow: 0 0 30px var(--primary); }
+    100% { transform: scale(1); text-shadow: 0 0 10px var(--primary); }
 }
 
-#quick-slots { display: flex; gap: 10px; }
-.slot {
-    width: 50px; height: 50px; background: rgba(0,0,0,0.6);
-    border: 1px solid #666; display: flex; justify-content: center; align-items: center;
-    font-weight: bold; color: #999;
-}
-
-#interaction-msg {
-    position: absolute; bottom: 30%; left: 50%; transform: translateX(-50%);
-    font-size: 1.5rem; color: yellow; text-shadow: 0 0 5px black;
+@keyframes zoomIn {
+    from { transform: scale(0); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
 }

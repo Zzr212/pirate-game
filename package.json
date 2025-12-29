@@ -1,7 +1,7 @@
 {
-  "name": "pirate-infection-game",
-  "version": "1.0.0",
-  "description": "3D Multiplayer Pirate Game",
+  "name": "cursed-crew-game",
+  "version": "2.0.0",
+  "description": "Premium Multiplayer Pirate Game",
   "main": "server.js",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.7.2",
-    "socket.io-client": "^4.7.2", 
+    "socket.io-client": "^4.7.2",
     "three": "^0.160.0"
   },
   "devDependencies": {
