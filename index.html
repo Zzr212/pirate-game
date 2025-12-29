@@ -3,99 +3,151 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cursed Gold - Pirate Horror</title>
+    <title>Cursed Gold - Captain's Edition</title>
     <link rel="stylesheet" href="/src/style.css">
+    <!-- Font Awesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
 <body>
     <div id="app"></div>
 
-    <!-- 3D CHARACTER PREVIEW (BEHIND UI) -->
-    <div id="menu-background-3d"></div>
+    <!-- 3D BACKGROUND LAYER -->
+    <div id="scene-layer"></div>
 
-    <!-- MAIN MENU (LOL STYLE) -->
+    <!-- === MAIN MENU === -->
     <div id="main-menu">
-        <div class="menu-nav">
-            <div class="nav-item active">PLAY</div>
-            <div class="nav-item">COLLECTION</div>
-            <div class="nav-item">SHOP</div>
-            <div class="nav-item" id="btn-builder">MAP BUILDER</div>
-        </div>
-        
-        <div class="menu-content">
-            <div class="character-display">
-                <!-- 3D Character is rendered behind here -->
-                <h1 id="char-name-display">CAPTAIN BLACKBEARD</h1>
-                <button id="btn-change-char" class="btn-secondary">CHANGE PIRATE</button>
+        <div class="menu-header">
+            <div class="logo-area">
+                <h1>CURSED GOLD</h1>
+                <span class="version">EARLY ACCESS v0.2</span>
             </div>
-            
-            <div class="play-section">
-                <input type="text" id="inp-nickname" placeholder="Enter Pirate Name" maxlength="12">
-                <button id="btn-play" class="btn-primary">FIND MATCH</button>
+            <div class="menu-nav">
+                <div class="nav-item active">PLAY</div>
+                <div class="nav-item">COLLECTION</div>
+                <div class="nav-item">PROFILE</div>
+            </div>
+        </div>
+
+        <div class="menu-body">
+            <!-- Left Side: Character Preview Name -->
+            <div class="char-info">
+                <h2>CAPTAIN<br>BLACKBEARD</h2>
+                <p>The scourge of the seven seas.</p>
+                <button id="btn-change-char" class="btn-hextech-small"><i class="fas fa-sync"></i> SWAP</button>
+            </div>
+
+            <!-- Right Side: Play Controls -->
+            <div class="play-controls">
+                <div class="input-group">
+                    <label>PIRATE NAME</label>
+                    <input type="text" id="inp-nickname" placeholder="Enter Name" maxlength="12">
+                </div>
+                
+                <button id="btn-play" class="btn-play-large">
+                    <span class="glow"></span>
+                    FIND MATCH
+                </button>
+                
+                <div class="sub-controls">
+                    <button id="btn-builder" class="btn-hextech"><i class="fas fa-hammer"></i> MAP BUILDER</button>
+                    <button class="btn-hextech"><i class="fas fa-cog"></i> SETTINGS</button>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- LOBBY SCREEN -->
+    <!-- === LOBBY === -->
     <div id="lobby-screen" style="display: none;">
-        <div class="lobby-container">
-            <h2>PIRATE COVE LOBBY</h2>
-            <div id="lobby-player-list">
-                <!-- Players injected here -->
-            </div>
-            <div class="lobby-controls">
+        <div class="lobby-window">
+            <div class="lobby-header">LOBBY - WAITING FOR PIRATES</div>
+            <div id="lobby-player-list" class="lobby-list"></div>
+            <div class="lobby-footer">
+                <button id="btn-leave-lobby" class="btn-secondary">LEAVE</button>
+                <div id="lobby-status">Waiting...</div>
                 <button id="btn-ready" class="btn-primary">READY UP</button>
-                <div id="lobby-status">Waiting for players...</div>
             </div>
         </div>
     </div>
 
-    <!-- GAME UI -->
+    <!-- === GAME HUD === -->
     <div id="game-ui" style="display: none;">
-        <div id="quest-tracker">
-            <h3>TASKS</h3>
+        <!-- Crosshair -->
+        <div id="crosshair"></div>
+
+        <!-- Top Status -->
+        <div class="hud-top">
+            <div class="role-badge" id="role-display">SURVIVOR</div>
+            <div class="timer-box" id="game-timer">60</div>
+            <div class="task-progress">
+                <span>TASKS</span>
+                <div class="progress-bar"><div id="task-bar-fill"></div></div>
+            </div>
+        </div>
+
+        <!-- Left Bottom: HP & Quickslots -->
+        <div class="hud-bottom-left">
+            <div class="hp-bar-container">
+                <div class="hp-icon"><i class="fas fa-heart"></i></div>
+                <div class="hp-bar"><div id="hp-fill" style="width: 100%;"></div></div>
+                <span id="hp-text">100/100</span>
+            </div>
+            <div class="quick-slots">
+                <div class="slot"><span class="key">1</span><i class="fas fa-bomb"></i></div>
+                <div class="slot"><span class="key">2</span><i class="fas fa-apple-alt"></i></div>
+                <div class="slot"><span class="key">3</span><i class="fas fa-compass"></i></div>
+                <div class="slot"><span class="key">4</span></div>
+            </div>
+        </div>
+
+        <!-- Quest List -->
+        <div class="quest-tracker">
+            <h3>ACTIVE TASKS</h3>
             <ul id="task-list"></ul>
         </div>
 
-        <div id="game-status-top">
-            <div id="role-display">SURVIVOR</div>
-            <div id="game-timer">60</div>
-            <div id="task-bar-container">
-                <div id="task-bar-fill"></div>
-            </div>
+        <!-- Interaction -->
+        <div id="interaction-prompt">
+            <div class="key-circle">E</div>
+            <span id="interaction-text">INTERACT</span>
         </div>
 
-        <div id="interaction-prompt">PRESS [E] TO INTERACT</div>
-
+        <!-- Task Modal (Minigame) -->
         <div id="task-modal" style="display: none;">
-            <div class="task-box">
-                <h2 id="task-title">FIX WIRING</h2>
+            <div class="task-window">
+                <h2 id="task-title">TASK</h2>
                 <div id="task-content"></div>
-                <button id="btn-close-task">CANCEL</button>
-            </div>
-        </div>
-        
-        <div id="spectator-ui" style="display: none;">
-            <div class="spec-banner">YOU ARE DEAD - SPECTATING</div>
-            <div class="spec-controls">
-                <button id="spec-prev">&lt;</button>
-                <span id="spec-target-name">Free Cam</span>
-                <button id="spec-next">&gt;</button>
+                <button id="btn-close-task" class="btn-secondary">CANCEL</button>
             </div>
         </div>
     </div>
 
-    <!-- BUILDER UI -->
+    <!-- === BUILDER UI === -->
     <div id="builder-ui" style="display: none;">
-        <div class="builder-panel">
-            <h3>MAP BUILDER</h3>
-            <p>[WASD] Move Cam | Click to Place</p>
-            <div class="builder-tools">
-                <button class="tool-btn active" data-type="spawn">Spawn Point (P)</button>
-                <button class="tool-btn" data-type="task">Task Location (T)</button>
-                <button class="tool-btn" data-type="portal">Exit Portal (E)</button>
+        <div class="builder-sidebar">
+            <h3>MAP EDITOR</h3>
+            <div class="tool-section">
+                <h4>PLACEMENT</h4>
+                <button class="tool-btn active" data-type="spawn"><i class="fas fa-user"></i> Player Spawn</button>
+                <button class="tool-btn" data-type="task"><i class="fas fa-cogs"></i> Task Point</button>
+                <button class="tool-btn" data-type="portal"><i class="fas fa-door-open"></i> Exit Portal</button>
+                <button class="tool-btn" data-type="light"><i class="fas fa-lightbulb"></i> Light Source</button>
             </div>
-            <button id="btn-export-map" class="btn-secondary">EXPORT JSON</button>
-            <button id="btn-exit-builder" class="btn-secondary">EXIT</button>
+            
+            <div class="tool-section">
+                <h4>CONTROLS</h4>
+                <p><span class="key">R-Click</span> Rotate Cam</p>
+                <p><span class="key">WASD</span> Move</p>
+                <p><span class="key">Q/E</span> Up/Down</p>
+                <p><span class="key">L-Click</span> Place</p>
+            </div>
+
+            <div class="builder-actions">
+                <button id="btn-export-map" class="btn-primary">SAVE JSON</button>
+                <button id="btn-exit-builder" class="btn-secondary">EXIT</button>
+            </div>
+        </div>
+        <div id="builder-overlay">
+            Coordinates: <span id="builder-coords">0, 0, 0</span>
         </div>
     </div>
 

@@ -10,458 +10,493 @@ let socket;
 let myId = null;
 let myRole = 'survivor';
 
-// Three.js Globals
+// Scene Globals
 let scene, camera, renderer, clock;
-let character, mixer; 
-let players = {}; // id -> { mesh, mixer, ... }
+let characterTemplate, character; // Template for cloning, 'character' is preview
+let mixer; // Preview mixer
+let players = {}; // id -> { mesh, mixer, actions{}, ... }
 let mapMesh = null;
 let taskMarkers = [];
 let portalMesh = null;
 
 // Inputs
-const keys = { w: false, a: false, s: false, d: false, space: false };
-let camYaw = 0, camPitch = 0.3;
+const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false, space: false };
+const mouse = new THREE.Vector2();
+let isMouseDown = false;
+let isRightMouseDown = false;
 
 // Builder State
-let builderConfig = { spawns: [], tasks: [], portal: {x:0, y:0, z:0} };
+let builderConfig = { spawns: [], tasks: [], portal: null };
 let builderTool = 'spawn';
+let ghostMesh = null;
+let builderCamYaw = 0;
+let builderCamPitch = 0;
+
+// Game State
+let camYaw = 0, camPitch = 0.3;
 
 // --- INIT ---
 function init() {
     // 1. Setup Scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x05080a);
-    scene.fog = new THREE.FogExp2(0x05080a, 0.02);
+    scene.background = new THREE.Color(0x05080a); // Dark blue/black
+    scene.fog = new THREE.Fog(0x05080a, 10, 60);
 
     camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
     camera.position.set(0, 5, 10);
 
-    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = true;
-    
-    // Append to different divs based on mode? No, one canvas, we toggle UI.
-    document.getElementById('menu-background-3d').appendChild(renderer.domElement);
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.getElementById('scene-layer').appendChild(renderer.domElement);
 
-    // Lights
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
-    scene.add(hemi);
-    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-    dir.position.set(10, 20, 10);
-    dir.castShadow = true;
-    scene.add(dir);
+    // 2. Lighting (Fixed Darkness)
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    scene.add(hemiLight);
 
-    // 2. Connect Socket
+    const dirLight = new THREE.DirectionalLight(0xffdfba, 1.2); // Warm sun
+    dirLight.position.set(20, 50, 20);
+    dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    scene.add(dirLight);
+
+    // 3. Connect Socket
     socket = io();
     setupSocket();
 
-    // 3. Inputs
+    // 4. Inputs
     setupInputs();
 
-    // 4. Load Assets (Map & Char)
+    // 5. Assets
     loadAssets().then(() => {
-        // Start Loop
         clock = new THREE.Clock();
-        animate();
-        // Setup Menu Character Preview
         setupMenuPreview();
+        animate();
     });
 
-    // 5. UI Bindings
-    document.getElementById('btn-play').onclick = () => {
-        const name = document.getElementById('inp-nickname').value || "Pirate";
-        socket.emit('joinLobby', { name: name, model: 'pirate_1' });
-    };
-    document.getElementById('btn-ready').onclick = () => socket.emit('playerReady');
-    document.getElementById('btn-builder').onclick = enterBuilderMode;
-    document.getElementById('btn-close-task').onclick = closeTaskModal;
-    
-    // Builder UI
-    document.querySelectorAll('.tool-btn').forEach(b => {
-        b.onclick = (e) => {
-            document.querySelectorAll('.tool-btn').forEach(x => x.classList.remove('active'));
-            e.target.classList.add('active');
-            builderTool = e.target.dataset.type;
-        };
-    });
-    document.getElementById('btn-export-map').onclick = () => console.log(JSON.stringify(builderConfig));
-    document.getElementById('btn-exit-builder').onclick = () => window.location.reload();
+    // 6. UI Bindings
+    bindUI();
 }
 
 async function loadAssets() {
     const loader = new GLTFLoader();
     
-    // LOAD MAP
+    // Load Map
     try {
         const mapGltf = await loader.loadAsync('/map.glb');
         mapMesh = mapGltf.scene;
+        mapMesh.traverse(c => { if(c.isMesh) { c.receiveShadow = true; c.castShadow = true; } });
         scene.add(mapMesh);
     } catch (e) {
-        console.warn("No map.glb found, creating fallback plane.");
-        const geo = new THREE.PlaneGeometry(100, 100);
-        const mat = new THREE.MeshStandardMaterial({ color: 0x333333 });
-        mapMesh = new THREE.Mesh(geo, mat);
-        mapMesh.rotation.x = -Math.PI/2;
-        scene.add(mapMesh);
+        console.warn("Map not found, creating grid.");
+        const grid = new THREE.GridHelper(100, 100, 0x444444, 0x222222);
+        scene.add(grid);
+        const plane = new THREE.Mesh(new THREE.PlaneGeometry(100,100), new THREE.MeshStandardMaterial({color:0x111111}));
+        plane.rotation.x = -Math.PI/2;
+        plane.receiveShadow = true;
+        scene.add(plane);
+        mapMesh = plane; // For raycasting
     }
-    
-    // LOAD CHARACTER (Placeholder)
+
+    // Load Character
     try {
         const charGltf = await loader.loadAsync('/character.gltf');
-        character = charGltf.scene;
-        // Keep original for cloning
+        characterTemplate = charGltf.scene;
+        characterTemplate.traverse(c => { if(c.isMesh) c.castShadow = true; });
+        characterTemplate.animations = charGltf.animations; // Store anims
     } catch(e) {
-        // Fallback cube
-        character = new THREE.Mesh(new THREE.BoxGeometry(1,2,1), new THREE.MeshStandardMaterial({color:0xff0000}));
+        console.warn("Character not found, using box.");
+        characterTemplate = new THREE.Mesh(new THREE.BoxGeometry(1,2,1), new THREE.MeshStandardMaterial({color:0xff0000}));
+        characterTemplate.animations = [];
     }
+}
+
+function bindUI() {
+    document.getElementById('btn-play').onclick = () => {
+        const name = document.getElementById('inp-nickname').value || "Pirate";
+        socket.emit('joinLobby', { name: name });
+    };
+    document.getElementById('btn-builder').onclick = enterBuilderMode;
+    document.getElementById('btn-ready').onclick = () => socket.emit('playerReady');
+    document.getElementById('btn-exit-builder').onclick = () => window.location.reload();
+    
+    // Builder Tools
+    document.querySelectorAll('.tool-btn').forEach(b => {
+        b.onclick = (e) => {
+            document.querySelectorAll('.tool-btn').forEach(x => x.classList.remove('active'));
+            const target = e.currentTarget; // use currentTarget for button with icon
+            target.classList.add('active');
+            builderTool = target.dataset.type;
+            updateGhostMesh();
+        };
+    });
+    
+    document.getElementById('btn-export-map').onclick = () => {
+        console.log("MAP CONFIG:", JSON.stringify(builderConfig));
+        alert("Config printed to Console (F12)");
+        socket.emit('saveMapConfig', builderConfig);
+    };
+}
+
+// --- ANIMATION SYSTEM ---
+function createPlayerMesh(id, pos) {
+    const mesh = SkeletonUtils.clone(characterTemplate);
+    mesh.position.set(pos.x, pos.y, pos.z);
+    scene.add(mesh);
+
+    // Setup Mixer
+    const pMixer = new THREE.AnimationMixer(mesh);
+    const actions = {};
+    
+    // Map animations names to actions
+    // Assumes names like "Idle", "Run", "Attack" in GLTF
+    if(characterTemplate.animations) {
+        characterTemplate.animations.forEach(clip => {
+            const action = pMixer.clipAction(clip);
+            // Handle names loosely
+            if(clip.name.includes('Idle')) actions['Idle'] = action;
+            if(clip.name.includes('Run') || clip.name.includes('Walk')) actions['Run'] = action;
+            if(clip.name.includes('Attack')) actions['Attack'] = action;
+            if(clip.name.includes('Death')) { actions['Death'] = action; action.clampWhenFinished = true; action.setLoop(THREE.LoopOnce); }
+        });
+    }
+
+    // Default Play
+    if(actions['Idle']) actions['Idle'].play();
+
+    return { mesh, mixer: pMixer, actions, currentAnim: 'Idle' };
+}
+
+function updateAnim(p, animName) {
+    if(!p.actions[animName]) return;
+    if(p.currentAnim === animName) return;
+    
+    const prev = p.actions[p.currentAnim];
+    const next = p.actions[animName];
+    
+    if(prev) prev.fadeOut(0.2);
+    next.reset().fadeIn(0.2).play();
+    p.currentAnim = animName;
 }
 
 // --- GAME LOGIC ---
 
-function setupSocket() {
-    socket.on('lobbyUpdate', (data) => {
-        if(currentMode !== MODES.LOBBY) enterLobby();
-        updateLobbyUI(data.players, data.status);
-    });
-
-    socket.on('gameStart', (data) => {
-        enterGame(data);
-    });
-
-    socket.on('updatePlayer', (p) => {
-        if(!players[p.id]) spawnPlayer(p);
-        const pl = players[p.id];
-        pl.targetPos.set(p.x, p.y, p.z);
-        pl.targetRot = p.rot;
-    });
-
-    socket.on('infectionStarted', (data) => {
-        document.getElementById('role-display').innerText = (data.captainId === socket.id) ? "YOU ARE THE CAPTAIN" : "SURVIVE";
-        document.getElementById('role-display').style.color = (data.captainId === socket.id) ? "red" : "#cdbe91";
-        if(players[data.captainId]) {
-            // Visual change for captain
-            players[data.captainId].mesh.scale.setScalar(1.2);
-            // Add red glow logic here
-        }
-    });
-
-    socket.on('playerInfected', (data) => {
-        if(players[data.id]) {
-            // Change model to skeleton or just color for now
-            players[data.id].mesh.material = new THREE.MeshStandardMaterial({color: 0xaaaaaa}); // Simplified
-        }
-        if(data.id === socket.id) {
-            myRole = 'skeleton';
-            document.getElementById('role-display').innerText = "HUNT THEM";
-        }
-    });
-
-    socket.on('playerDied', (data) => {
-        if(players[data.id]) players[data.id].mesh.visible = false;
-        if(data.id === socket.id) {
-            myRole = 'spectator';
-            document.getElementById('spectator-ui').style.display = 'block';
-        }
-    });
-
-    socket.on('portalOpened', (pos) => {
-        if(!portalMesh) {
-            const geo = new THREE.TorusGeometry(1, 0.2, 16, 100);
-            const mat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
-            portalMesh = new THREE.Mesh(geo, mat);
-            portalMesh.position.set(pos.x, pos.y, pos.z);
-            scene.add(portalMesh);
-            // Add particle effect logic here
-        }
-        showNotification("PORTAL IS OPEN! ESCAPE!");
-    });
-}
-
-// --- MODES & UI ---
-
-function enterLobby() {
-    currentMode = MODES.LOBBY;
-    document.getElementById('main-menu').style.display = 'none';
-    document.getElementById('lobby-screen').style.display = 'flex';
-    // Clear 3D preview
-    scene.remove(previewChar);
-}
-
-function updateLobbyUI(playersDict, status) {
-    const list = document.getElementById('lobby-player-list');
-    list.innerHTML = '';
-    Object.values(playersDict).forEach(p => {
-        const div = document.createElement('div');
-        div.className = `lobby-player ${p.isReady ? 'ready' : ''}`;
-        div.innerHTML = `<span>${p.name}</span> <span>${p.isReady ? 'READY' : '...'}</span>`;
-        list.appendChild(div);
-    });
-}
-
-function enterGame(data) {
-    currentMode = MODES.GAME;
-    document.getElementById('lobby-screen').style.display = 'none';
-    document.getElementById('game-ui').style.display = 'block';
-    
-    // Spawn self
-    const me = data.players[socket.id];
-    spawnPlayer(me, true);
-    
-    // Spawn others
-    Object.values(data.players).forEach(p => {
-        if(p.id !== socket.id) spawnPlayer(p);
-    });
-
-    // Create Tasks
-    data.mapConfig.tasks.forEach(t => {
-        const marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.3), new THREE.MeshBasicMaterial({color: 0xffff00}));
-        marker.position.set(t.x, t.y, t.z);
-        // marker.userData = { id: t.id, type: t.type }; // Store logic
-        scene.add(marker);
-        taskMarkers.push({ mesh: marker, id: t.id, type: t.type });
-    });
-
-    // Update Task UI
-    const ul = document.getElementById('task-list');
-    ul.innerHTML = '';
-    me.tasks.forEach(tid => {
-        const li = document.createElement('li');
-        li.id = `ui-task-${tid}`;
-        li.innerText = tid; // Replace with proper name later
-        ul.appendChild(li);
-    });
-    
-    document.body.requestPointerLock();
-}
-
-function spawnPlayer(data, isMe = false) {
-    if(players[data.id]) return; // Already exists
-    
-    // Clone character model
-    const mesh = SkeletonUtils.clone(character);
-    mesh.position.set(data.x, data.y, data.z);
-    scene.add(mesh);
-
-    players[data.id] = {
-        id: data.id,
-        mesh: mesh,
-        targetPos: new THREE.Vector3(data.x, data.y, data.z),
-        targetRot: data.rot
-    };
-
-    if(isMe) {
-        myId = data.id;
-        // Attach camera
-        // Camera logic is in animate loop
-    }
-}
-
-// --- TASK LOGIC ---
-
-function checkInteraction() {
-    if(myRole !== 'survivor') return;
-    
-    const myPos = players[myId].mesh.position;
-    let closestTask = null;
-    let minDist = 2.0;
-
-    taskMarkers.forEach(t => {
-        // Check if I have this task
-        // We need local player data. Let's assume we store "myTasks" array globally or check UI
-        const dist = myPos.distanceTo(t.mesh.position);
-        if(dist < minDist) {
-            closestTask = t;
-            minDist = dist;
-        }
-    });
-
-    const prompt = document.getElementById('interaction-prompt');
-    if(closestTask) {
-        prompt.style.display = 'block';
-        prompt.innerText = `PRESS [E] TO ${closestTask.type.toUpperCase()}`;
-        if(keys.e_pressed) {
-            keys.e_pressed = false; // consume key
-            openTask(closestTask);
-        }
-    } else {
-        prompt.style.display = 'none';
-    }
-    
-    // Portal Logic
-    if(portalMesh && myPos.distanceTo(portalMesh.position) < 3.0) {
-        prompt.style.display = 'block';
-        prompt.innerText = "PRESS [E] TO ESCAPE";
-        if(keys.e_pressed) {
-            socket.emit('escape');
-        }
-    }
-}
-
-function openTask(task) {
-    document.exitPointerLock();
-    const modal = document.getElementById('task-modal');
-    modal.style.display = 'flex';
-    document.getElementById('task-title').innerText = task.type.toUpperCase();
-    
-    const content = document.getElementById('task-content');
-    content.innerHTML = '';
-    
-    // Simple mini-game: Click 3 red buttons
-    for(let i=0; i<3; i++) {
-        const btn = document.createElement('div');
-        btn.className = 'wire-game-btn';
-        btn.onclick = function() {
-            this.classList.add('fixed');
-            if(document.querySelectorAll('.wire-game-btn.fixed').length === 3) {
-                socket.emit('completeTask', task.id);
-                closeTaskModal();
-            }
-        };
-        content.appendChild(btn);
-    }
-}
-
-function closeTaskModal() {
-    document.getElementById('task-modal').style.display = 'none';
-    document.body.requestPointerLock();
-}
-
-// --- ANIMATION LOOP ---
 function animate() {
     requestAnimationFrame(animate);
     const delta = clock.getDelta();
 
-    if(currentMode === MODES.GAME && players[myId]) {
-        const me = players[myId];
-        
-        if(myRole !== 'spectator') {
-            // Movement Logic
-            const speed = (myRole === 'captain') ? 7 : 5;
-            const dir = new THREE.Vector3();
-            const forward = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
-            const right = new THREE.Vector3(Math.sin(camYaw - Math.PI/2), 0, Math.cos(camYaw - Math.PI/2));
-            
-            if(keys.w) dir.sub(forward);
-            if(keys.s) dir.add(forward);
-            if(keys.a) dir.add(right);
-            if(keys.d) dir.sub(right);
-            
-            if(dir.length() > 0) {
-                dir.normalize().multiplyScalar(speed * delta);
-                me.mesh.position.add(dir);
-                // Rotation
-                me.mesh.rotation.y = Math.atan2(-dir.x, -dir.z); // Simple look dir
-                
-                // Send to server
-                socket.emit('updatePos', {
-                    x: me.mesh.position.x, 
-                    y: me.mesh.position.y, 
-                    z: me.mesh.position.z,
-                    rot: me.mesh.rotation.y,
-                    anim: 'Run'
-                });
-            }
-
-            // Attack Logic
-            if(keys.mouseLeft && (myRole === 'captain' || myRole === 'skeleton')) {
-                // Raycast or distance check to kill
-                // For simplicity, just check distance to all players
-                Object.values(players).forEach(target => {
-                    if(target.id !== myId) {
-                        if(me.mesh.position.distanceTo(target.mesh.position) < 1.5) {
-                            socket.emit('attackPlayer', target.id);
-                        }
-                    }
-                });
-                keys.mouseLeft = false; // Cooldown/One click
-            }
-
-            // Camera Follow
-            const camOff = new THREE.Vector3(0, 4, 6); // TP View
-            camOff.applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
-            camera.position.copy(me.mesh.position).add(camOff);
-            camera.lookAt(me.mesh.position.clone().add(new THREE.Vector3(0, 1.5, 0)));
-        } else {
-            // Spectator Cam (Free Fly)
-            // Implement WASD free cam
-        }
-
-        checkInteraction();
+    if(currentMode === MODES.MENU) {
+        // Rotate preview char
+        if(character) character.rotation.y += delta * 0.5;
+        if(mixer) mixer.update(delta);
     }
-    
-    // Network Interpolation for others
-    Object.values(players).forEach(p => {
-        if(p.id !== myId) {
-            p.mesh.position.lerp(p.targetPos, 10 * delta);
-            p.mesh.rotation.y = p.targetRot; // Need lerp here too ideally
-        }
-    });
+    else if(currentMode === MODES.GAME) {
+        updateGame(delta);
+    }
+    else if(currentMode === MODES.BUILDER) {
+        updateBuilder(delta);
+    }
 
     renderer.render(scene, camera);
 }
 
-// --- INPUTS ---
-function setupInputs() {
-    window.addEventListener('keydown', (e) => {
-        if(e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = true;
-        if(e.key === 'e') keys.e_pressed = true;
-    });
-    window.addEventListener('keyup', (e) => {
-        if(e.key.toLowerCase() in keys) keys[e.key.toLowerCase()] = false;
-    });
-    window.addEventListener('mousemove', (e) => {
-        if(document.pointerLockElement) {
-            camYaw -= e.movementX * 0.002;
+function updateGame(delta) {
+    if(!myId || !players[myId]) return;
+    const me = players[myId];
+    
+    // 1. Movement Logic (WASD)
+    if(myRole !== 'spectator') {
+        const speed = keys.shift ? 7 : 4;
+        const dir = new THREE.Vector3();
+        
+        // Camera Forward (flat)
+        const forward = new THREE.Vector3(Math.sin(camYaw), 0, Math.cos(camYaw));
+        const right = new THREE.Vector3(Math.sin(camYaw - Math.PI/2), 0, Math.cos(camYaw - Math.PI/2));
+
+        if(keys.w) dir.sub(forward);
+        if(keys.s) dir.add(forward);
+        if(keys.a) dir.add(right);
+        if(keys.d) dir.sub(right);
+
+        let anim = 'Idle';
+
+        if(dir.length() > 0) {
+            dir.normalize();
+            me.mesh.position.addScaledVector(dir, speed * delta);
+            // Rotate character to face movement
+            const targetRot = Math.atan2(-dir.x, -dir.z);
+            // Smooth rotation
+            let rotDiff = targetRot - me.mesh.rotation.y;
+            while(rotDiff > Math.PI) rotDiff -= Math.PI*2;
+            while(rotDiff < -Math.PI) rotDiff += Math.PI*2;
+            me.mesh.rotation.y += rotDiff * 10 * delta;
+            
+            anim = 'Run';
+        }
+
+        // Attack Logic
+        if(isMouseDown && (myRole === 'captain' || myRole === 'skeleton')) {
+             anim = 'Attack';
+             socket.emit('attackPlayer', 'check_collision_server'); 
+             // Logic simplified: server validates hits, but we trigger anim
+             isMouseDown = false; 
+             // Reset to idle after attack (hacky without state machine)
+             setTimeout(() => isMouseDown = false, 500); 
+        }
+
+        // Apply Animation
+        updateAnim(me, anim);
+        
+        // Sync to Server
+        socket.emit('updatePos', {
+            x: me.mesh.position.x, y: me.mesh.position.y, z: me.mesh.position.z,
+            rot: me.mesh.rotation.y, anim: anim
+        });
+
+        // Camera Follow (TPS)
+        const camDist = 6;
+        const camHeight = 4;
+        const camPos = new THREE.Vector3(0, camHeight, camDist);
+        camPos.applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+        camPos.add(me.mesh.position);
+        
+        camera.position.lerp(camPos, 0.2); // Smooth follow
+        camera.lookAt(me.mesh.position.x, me.mesh.position.y + 1.5, me.mesh.position.z);
+        
+        // Raycast Interaction
+        checkInteraction();
+    }
+    
+    // Update Others
+    Object.values(players).forEach(p => {
+        if(p.mixer) p.mixer.update(delta);
+        if(p.id !== myId) {
+            p.mesh.position.lerp(p.targetPos, 10 * delta);
+            // Simple rotation sync
+            let rotDiff = p.targetRot - p.mesh.rotation.y;
+            while(rotDiff > Math.PI) rotDiff -= Math.PI*2;
+            while(rotDiff < -Math.PI) rotDiff += Math.PI*2;
+            p.mesh.rotation.y += rotDiff * 10 * delta;
+            
+            updateAnim(p, p.serverAnim);
         }
     });
-    window.addEventListener('mousedown', () => keys.mouseLeft = true);
 }
 
-// --- BUILDER MODE ---
+function updateBuilder(delta) {
+    // 1. Camera Movement (Free Fly)
+    const speed = 15 * delta;
+    const dir = new THREE.Vector3();
+    const forward = new THREE.Vector3(Math.sin(builderCamYaw), 0, Math.cos(builderCamYaw));
+    const right = new THREE.Vector3(Math.sin(builderCamYaw - Math.PI/2), 0, Math.cos(builderCamYaw - Math.PI/2));
+
+    if(keys.w) camera.position.addScaledVector(forward, -speed);
+    if(keys.s) camera.position.addScaledVector(forward, speed);
+    if(keys.a) camera.position.addScaledVector(right, speed);
+    if(keys.d) camera.position.addScaledVector(right, -speed);
+    if(keys.q) camera.position.y += speed;
+    if(keys.e) camera.position.y -= speed;
+
+    camera.rotation.set(builderCamPitch, builderCamYaw, 0);
+
+    // 2. Ghost Mesh Positioning
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObject(mapMesh, true);
+    
+    if(intersects.length > 0) {
+        const p = intersects[0].point;
+        if(ghostMesh) {
+            ghostMesh.position.copy(p);
+            // Snap to grid option?
+            // ghostMesh.position.x = Math.round(p.x);
+        }
+        
+        // Click to place
+        if(isMouseDown && ghostMesh) {
+            isMouseDown = false; // Debounce
+            placeObject(p);
+        }
+        
+        document.getElementById('builder-coords').innerText = `${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`;
+    }
+}
+
+function placeObject(pos) {
+    const p = {x: pos.x, y: pos.y, z: pos.z};
+    
+    // Visual Marker
+    const marker = ghostMesh.clone();
+    marker.material = marker.material.clone();
+    marker.material.opacity = 1;
+    marker.material.transparent = false;
+    scene.add(marker);
+    
+    // Save to Config
+    if(builderTool === 'spawn') builderConfig.spawns.push(p);
+    else if(builderTool === 'task') builderConfig.tasks.push({id: 't_'+Date.now(), type:'wires', ...p});
+    else if(builderTool === 'portal') builderConfig.portal = p;
+    else if(builderTool === 'light') { /* Add light logic later */ }
+}
+
+function updateGhostMesh() {
+    if(ghostMesh) scene.remove(ghostMesh);
+    
+    let geo, color;
+    if(builderTool === 'spawn') { geo = new THREE.CylinderGeometry(0.5, 0.5, 2); color = 0x00ff00; }
+    else if(builderTool === 'task') { geo = new THREE.OctahedronGeometry(0.5); color = 0xffff00; }
+    else if(builderTool === 'portal') { geo = new THREE.TorusGeometry(1, 0.2); color = 0x00ffff; }
+    else { geo = new THREE.BoxGeometry(1,1,1); color = 0xffffff; }
+    
+    ghostMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color: color, transparent: true, opacity: 0.5}));
+    scene.add(ghostMesh);
+}
+
+// --- SETUP FUNCTIONS ---
+
+function setupMenuPreview() {
+    if(!characterTemplate) return;
+    character = SkeletonUtils.clone(characterTemplate);
+    scene.add(character);
+    
+    // Set position relative to camera for menu
+    character.position.set(2, 0, 5); 
+    character.rotation.y = -0.5;
+    
+    mixer = new THREE.AnimationMixer(character);
+    // Play idle
+    if(characterTemplate.animations) {
+        const idle = characterTemplate.animations.find(c => c.name.includes('Idle'));
+        if(idle) mixer.clipAction(idle).play();
+    }
+}
+
 function enterBuilderMode() {
     currentMode = MODES.BUILDER;
     document.getElementById('main-menu').style.display = 'none';
     document.getElementById('builder-ui').style.display = 'block';
     
-    // Enable free fly cam
-    camera.position.set(0, 20, 0);
-    camera.lookAt(0,0,0);
+    // Reset Cam for builder
+    camera.position.set(0, 20, 20);
+    builderCamPitch = -0.5;
+    updateGhostMesh();
+}
+
+function setupSocket() {
+    socket.on('lobbyUpdate', (data) => {
+        if(currentMode === MODES.MENU) {
+            currentMode = MODES.LOBBY;
+            document.getElementById('main-menu').style.display = 'none';
+            document.getElementById('lobby-screen').style.display = 'flex';
+            if(character) scene.remove(character); // Remove preview
+        }
+        
+        // Render Lobby List
+        const list = document.getElementById('lobby-player-list');
+        list.innerHTML = '';
+        Object.values(data.players).forEach(p => {
+            list.innerHTML += `<div style="padding:10px; border:1px solid #444; margin:5px; color:${p.isReady?'lime':'white'}">${p.name} ${p.isReady?'(READY)':''}</div>`;
+        });
+    });
+
+    socket.on('gameStart', (data) => {
+        currentMode = MODES.GAME;
+        document.getElementById('lobby-screen').style.display = 'none';
+        document.getElementById('game-ui').style.display = 'block';
+        
+        // Init Players
+        Object.values(data.players).forEach(p => {
+            const isMe = p.id === socket.id;
+            const obj = createPlayerMesh(p.id, p);
+            obj.targetPos = new THREE.Vector3(p.x, p.y, p.z);
+            obj.targetRot = p.rot;
+            obj.serverAnim = 'Idle';
+            players[p.id] = obj;
+            
+            if(isMe) {
+                myId = p.id;
+                myRole = p.role;
+                document.getElementById('role-display').innerText = myRole.toUpperCase();
+                // Pointer Lock for Game
+                document.body.requestPointerLock();
+            }
+        });
+
+        // Spawn Tasks
+        data.mapConfig.tasks.forEach(t => {
+            const m = new THREE.Mesh(new THREE.OctahedronGeometry(0.3), new THREE.MeshBasicMaterial({color:0xffff00}));
+            m.position.set(t.x, t.y, t.z);
+            scene.add(m);
+            taskMarkers.push({mesh: m, id: t.id});
+        });
+    });
+    
+    socket.on('updatePlayer', (p) => {
+        if(players[p.id]) {
+            players[p.id].targetPos.set(p.x, p.y, p.z);
+            players[p.id].targetRot = p.rot;
+            players[p.id].serverAnim = p.anim;
+        }
+    });
+}
+
+function setupInputs() {
+    window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; if(e.key === 'Shift') keys.shift = true; });
+    window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; if(e.key === 'Shift') keys.shift = false; });
     
     window.addEventListener('mousedown', (e) => {
-        if(currentMode !== MODES.BUILDER || !document.pointerLockElement) return;
-        
-        // Raycast to floor
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(0,0), camera); // Center of screen
-        const intersects = raycaster.intersectObject(mapMesh);
-        
-        if(intersects.length > 0) {
-            const p = intersects[0].point;
-            const marker = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2, 0.5), new THREE.MeshBasicMaterial({color: 0x00ff00}));
-            marker.position.copy(p);
-            scene.add(marker);
+        if(e.button === 0) isMouseDown = true; // Left
+        if(e.button === 2) isRightMouseDown = true; // Right
+    });
+    window.addEventListener('mouseup', () => { isMouseDown = false; isRightMouseDown = false; });
+    window.addEventListener('contextmenu', e => e.preventDefault()); // Block context menu
 
-            if(builderTool === 'spawn') builderConfig.spawns.push({x:p.x, y:p.y, z:p.z});
-            else if(builderTool === 'task') builderConfig.tasks.push({id: 't'+Date.now(), type:'wires', x:p.x, y:p.y, z:p.z});
-            else if(builderTool === 'portal') {
-                builderConfig.portal = {x:p.x, y:p.y, z:p.z};
-                marker.material.color.setHex(0x00ffff);
-            }
+    window.addEventListener('mousemove', (e) => {
+        // Mouse Coordinates for Builder (-1 to 1)
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+        if(currentMode === MODES.GAME && document.pointerLockElement) {
+            camYaw -= e.movementX * 0.002;
+            camPitch -= e.movementY * 0.002;
+            camPitch = Math.max(-1.0, Math.min(1.0, camPitch));
+        }
+        else if(currentMode === MODES.BUILDER && isRightMouseDown) {
+            // Builder Cam Rotation
+            builderCamYaw -= e.movementX * 0.004;
+            builderCamPitch -= e.movementY * 0.004;
+        }
+    });
+}
+
+function checkInteraction() {
+    if(!myId) return;
+    const mePos = players[myId].mesh.position;
+    let near = false;
+    
+    taskMarkers.forEach(t => {
+        if(mePos.distanceTo(t.mesh.position) < 2) {
+            near = true;
+            document.getElementById('interaction-prompt').style.display = 'flex';
+            document.getElementById('interaction-text').innerText = "DO TASK";
+            if(keys.e) { keys.e = false; openTaskUI(t.id); }
         }
     });
     
-    document.body.requestPointerLock();
+    if(!near) document.getElementById('interaction-prompt').style.display = 'none';
 }
 
-let previewChar;
-function setupMenuPreview() {
-    // Show character in menu
-    previewChar = SkeletonUtils.clone(character);
-    previewChar.position.set(0, -1, -3);
-    previewChar.scale.setScalar(1.5);
-    scene.add(previewChar);
-    camera.position.set(0, 0, 0);
-    camera.lookAt(0, 0, -5);
+function openTaskUI(id) {
+    document.exitPointerLock();
+    document.getElementById('task-modal').style.display = 'flex';
+    // ... Task logic ...
+    document.getElementById('btn-close-task').onclick = () => {
+         document.getElementById('task-modal').style.display = 'none';
+         document.body.requestPointerLock();
+         socket.emit('completeTask', id); // Simplified
+    };
 }
 
 init();
