@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pirate Mutiny 3D</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Three.js Import Map -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="ui-layer">
+        <div id="lobby-screen">
+            <h1>PIRATE MUTINY</h1>
+            <p>Waiting for players...</p>
+            <button id="ready-btn">READY TO SAIL</button>
+            <div id="player-list"></div>
+        </div>
+
+        <div id="game-ui" style="display: none;">
+            <div id="role-display">Role: Crewmate</div>
+            <div id="tasks-list">
+                <h3>Tasks:</h3>
+                <ul id="task-ul">
+                    <li>Scrub the Deck</li>
+                    <li>Count the Gold</li>
+                    <li>Fix the Sails</li>
+                    <li>Check the Cannons</li>
+                    <li>Drink Rum</li>
+                </ul>
+            </div>
+            <div id="message-area"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="game.js"></script>
+</body>
+</html>

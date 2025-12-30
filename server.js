@@ -1,234 +1,159 @@
 const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const app = express();
+const http = require('http').createServer(app);
+const io = require('socket.io')(http);
 const path = require('path');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-    cors: { origin: "*" },
-    pingInterval: 2000,
-    pingTimeout: 5000
-});
+app.use(express.static(path.join(__dirname, 'public')));
 
-app.use(express.static(path.join(__dirname, 'dist')));
-
-// --- GAME CONFIGURATION ---
-const CONFIG = {
-    TASKS_TO_WIN: 10,
-    INFECTED_DMG: 34,    // 3 hits to kill
-    SKELETON_DMG: 20,    // 5 hits to kill
-    MATCH_START_TIME: 10, // Seconds (shortened for testing)
-    MIN_PLAYERS: 2
-};
-
-// --- STATE ---
+// Game State
 let players = {};
-let gameState = 'LOBBY'; // LOBBY, PREGAME, PLAYING, END
-let tasksCompleted = 0;
-let matchTimer = null;
+let gameStarted = false;
+let gameTimer = null;
+let infectionTimer = null;
+const INFECTION_DELAY = 30000; // 30 sekundi
 
 io.on('connection', (socket) => {
-    console.log(`[+] Player connected: ${socket.id}`);
+    console.log('Igrac spojen:', socket.id);
 
-    // Init Player Data
+    // Kreiraj novog igraca
     players[socket.id] = {
         id: socket.id,
-        x: 0, y: 10, z: 0, // Spawn high to avoid floor clipping initially
+        x: 0,
+        y: 0,
+        z: 0,
         rotation: 0,
-        role: gameState === 'LOBBY' ? 'LOBBY' : 'SPECTATOR',
+        role: 'crew', // crew, captain, skeleton
+        isDead: false,
         isReady: false,
-        hp: 100,
-        maxHp: 100,
-        dead: false,
-        anim: 'Idle',
-        username: `Pirate#${socket.id.substr(0,4)}`
+        tasksCompleted: 0,
+        anim: 'Idle'
     };
 
-    // Force spectator if joining mid-game
-    if (gameState === 'PLAYING' || gameState === 'PREGAME') {
-        players[socket.id].role = 'SPECTATOR';
-        players[socket.id].dead = true;
-        socket.emit('gameState', gameState);
-        socket.emit('forceSpectate');
-    }
+    // Posalji trenutno stanje novom igracu
+    socket.emit('currentPlayers', players);
+    socket.emit('gameStatus', gameStarted);
+    
+    // Obavijesti ostale o novom igracu
+    socket.broadcast.emit('newPlayer', players[socket.id]);
 
-    io.emit('updatePlayers', players);
-    io.emit('lobbyStatus', getLobbyInfo());
-
-    // --- EVENTS ---
-
+    // Igrac spreman (Lobby logic)
     socket.on('playerReady', () => {
-        if (gameState !== 'LOBBY') return;
         if (players[socket.id]) {
-            players[socket.id].isReady = !players[socket.id].isReady;
-            io.emit('updatePlayers', players);
-            checkLobbyStart();
+            players[socket.id].isReady = true;
+            io.emit('updatePlayerStatus', { id: socket.id, isReady: true });
+            checkStartGame();
         }
     });
 
-    socket.on('updateMove', (data) => {
-        const p = players[socket.id];
-        if (!p || p.dead) return;
-        
-        // Basic validation could go here
-        p.x = data.x;
-        p.y = data.y;
-        p.z = data.z;
-        p.rotation = data.rotation;
-        p.anim = data.anim;
-
-        // Broadcast raw data (Client will interpolate)
-        socket.broadcast.emit('playerMoved', { 
-            id: socket.id, 
-            ...data 
-        });
+    // Kretanje igraca
+    socket.on('playerMovement', (movementData) => {
+        if (players[socket.id] && !players[socket.id].isDead) {
+            players[socket.id].x = movementData.x;
+            players[socket.id].y = movementData.y;
+            players[socket.id].z = movementData.z;
+            players[socket.id].rotation = movementData.rotation;
+            players[socket.id].anim = movementData.anim;
+            
+            // Emituj samo osnovne podatke ostalima (ne spamuj cijeli objekat)
+            socket.broadcast.emit('playerMoved', {
+                id: socket.id,
+                x: players[socket.id].x,
+                y: players[socket.id].y,
+                z: players[socket.id].z,
+                rotation: players[socket.id].rotation,
+                anim: players[socket.id].anim
+            });
+        }
     });
 
-    socket.on('attackHit', (targetId) => {
-        if (gameState !== 'PLAYING') return;
-        
+    // Napad (Melee)
+    socket.on('attack', () => {
         const attacker = players[socket.id];
-        const victim = players[targetId];
+        if (!attacker || attacker.role === 'crew' || attacker.isDead) return;
 
-        if (!attacker || !victim || attacker.dead || victim.dead) return;
+        // Provjeri distancu do drugih igraca (Server-side validation)
+        for (let id in players) {
+            if (id !== socket.id) {
+                const target = players[id];
+                if (target.isDead) continue;
+                if (attacker.role === 'skeleton' && target.role !== 'crew') continue; // Skeletoni ne napadaju kapetana
 
-        // Calculate Damage
-        let damage = 0;
-        if (attacker.role === 'CAPTAIN') damage = CONFIG.INFECTED_DMG;
-        else if (attacker.role === 'SKELETON') damage = CONFIG.SKELETON_DMG;
-        else return; // Crew cannot deal damage yet
+                const dx = attacker.x - target.x;
+                const dz = attacker.z - target.z;
+                const dist = Math.sqrt(dx*dx + dz*dz);
 
-        victim.hp -= damage;
-        io.to(victim.id).emit('hurt', victim.hp); // Visual feedback for victim
-        io.emit('playerHpUpdate', { id: victim.id, hp: victim.hp });
-
-        // Death Logic
-        if (victim.hp <= 0) {
-            victim.hp = 0;
-            if (attacker.role === 'CAPTAIN' && victim.role === 'CREW') {
-                // Infection
-                victim.role = 'SKELETON';
-                victim.hp = 100;
-                victim.dead = false; // Undead
-                io.emit('chatMessage', { user: 'GAME', text: `${victim.username} rose as a Skeleton!` });
-            } else {
-                // Death
-                victim.dead = true;
-                victim.role = 'SPECTATOR';
-                io.emit('playerDied', victim.id);
+                if (dist < 2.5) { // Range napada
+                    // Kill logic
+                    if (attacker.role === 'captain') {
+                        // Kapetan ubija -> postaje skeleton
+                        target.isDead = true; // Tehnicki mrtav kao crew
+                        target.role = 'skeleton';
+                        target.isDead = false; // Ozivi kao skeleton
+                        io.emit('playerInfected', { id: target.id, killerId: socket.id });
+                    } else if (attacker.role === 'skeleton') {
+                        // Skeleton samo ubija
+                        target.isDead = true;
+                        io.emit('playerKilled', { id: target.id, killerId: socket.id });
+                    }
+                }
             }
-            io.emit('updatePlayers', players); // Full sync on role change
-            checkWinCondition();
-        }
-    });
-
-    socket.on('completeTask', () => {
-        if (gameState !== 'PLAYING') return;
-        tasksCompleted++;
-        io.emit('taskUpdate', { current: tasksCompleted, total: CONFIG.TASKS_TO_WIN });
-        
-        if (tasksCompleted >= CONFIG.TASKS_TO_WIN) {
-            endGame('CREW ESCAPED!');
         }
     });
 
     socket.on('disconnect', () => {
-        console.log(`[-] Player disconnected: ${socket.id}`);
+        console.log('Igrac odspojen:', socket.id);
         delete players[socket.id];
-        io.emit('updatePlayers', players);
-        checkWinCondition(); // Check if last crew left
+        io.emit('disconnect', socket.id);
+        
+        // Reset igre ako nema nikoga
+        if (Object.keys(players).length === 0) {
+            resetGame();
+        }
     });
 });
 
-// --- GAME LOOP LOGIC ---
-
-function checkLobbyStart() {
-    const ids = Object.keys(players);
-    const readyCount = ids.filter(id => players[id].isReady).length;
-    
-    // Logic: If >2 players and ALL ready -> Start
-    if (ids.length >= CONFIG.MIN_PLAYERS && readyCount === ids.length) {
-        startCountdown();
+function checkStartGame() {
+    const playerIds = Object.keys(players);
+    if (playerIds.length >= 2 && playerIds.every(id => players[id].isReady)) {
+        startGame();
     }
 }
 
-function startCountdown() {
-    if (gameState !== 'LOBBY') return;
-    gameState = 'PREGAME';
-    io.emit('gameState', 'PREGAME');
-    
-    let count = 5;
-    const interval = setInterval(() => {
-        io.emit('timer', count);
-        count--;
-        if (count < 0) {
-            clearInterval(interval);
-            startGame();
-        }
-    }, 1000);
-}
-
 function startGame() {
-    gameState = 'PLAYING';
-    tasksCompleted = 0;
+    gameStarted = true;
+    io.emit('gameStart');
     
-    // Assign Roles
-    const ids = Object.keys(players);
-    const captainIndex = Math.floor(Math.random() * ids.length);
-    
-    ids.forEach((id, idx) => {
-        const p = players[id];
-        p.isReady = false;
-        p.dead = false;
-        p.hp = 100;
-        p.role = (idx === captainIndex) ? 'CAPTAIN' : 'CREW';
-        
-        // Random Spawn Position circle
-        const angle = (idx / ids.length) * Math.PI * 2;
-        p.x = Math.cos(angle) * 5;
-        p.z = Math.sin(angle) * 5;
+    // Resetuj pozicije
+    Object.keys(players).forEach((id, index) => {
+        players[id].role = 'crew';
+        players[id].isDead = false;
+        // Rasporedi ih u krug
+        players[id].x = Math.cos(index) * 5;
+        players[id].z = Math.sin(index) * 5;
     });
+    io.emit('currentPlayers', players);
 
-    io.emit('gameState', 'PLAYING');
-    io.emit('updatePlayers', players);
-    io.emit('chatMessage', { user: 'GAME', text: 'Find tasks! The Captain is among you...' });
-}
-
-function checkWinCondition() {
-    if (gameState !== 'PLAYING') return;
-    const ids = Object.keys(players);
-    const crewAlive = ids.filter(id => players[id].role === 'CREW' && !players[id].dead).length;
-    const infectedAlive = ids.filter(id => (players[id].role === 'CAPTAIN' || players[id].role === 'SKELETON') && !players[id].dead).length;
-
-    if (crewAlive === 0) endGame('THE CURSE CONSUMED ALL!');
-    // Infected win condition is implicit (kill all crew)
-}
-
-function endGame(reason) {
-    gameState = 'END';
-    io.emit('gameOver', reason);
-    setTimeout(resetGame, 8000);
+    // Timer za infekciju
+    console.log("Game started. Infection in 30s.");
+    infectionTimer = setTimeout(() => {
+        const playerIds = Object.keys(players);
+        if (playerIds.length > 0) {
+            const randomId = playerIds[Math.floor(Math.random() * playerIds.length)];
+            players[randomId].role = 'captain';
+            io.emit('captainSelected', { id: randomId });
+            console.log(`Player ${randomId} is the Captain.`);
+        }
+    }, INFECTION_DELAY);
 }
 
 function resetGame() {
-    gameState = 'LOBBY';
-    tasksCompleted = 0;
-    Object.values(players).forEach(p => {
-        p.role = 'LOBBY';
-        p.isReady = false;
-        p.hp = 100;
-        p.dead = false;
-    });
-    io.emit('gameState', 'LOBBY');
-    io.emit('updatePlayers', players);
-}
-
-function getLobbyInfo() {
-    return { players: Object.keys(players).length };
+    gameStarted = false;
+    clearTimeout(infectionTimer);
+    players = {}; 
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+http.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
